@@ -2,6 +2,7 @@ package wailsui
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -23,6 +24,24 @@ func TestOAuthCallbackFromDevToolsTabsFindsMatchingNewAPICallback(t *testing.T) 
 		t.Fatal("expected callback URL to be detected")
 	}
 	if callbackURL != "https://x666.me/oauth/linuxdo?code=code-123&state=state-123" {
+		t.Fatalf("callbackURL = %q", callbackURL)
+	}
+	if tabID != "match" {
+		t.Fatalf("tabID = %q, want match", tabID)
+	}
+}
+
+func TestOAuthCallbackFromDevToolsTabsFindsNewAPIBackendCallback(t *testing.T) {
+	raw := []byte(`[
+		{"id":"ignore","url":"https://connect.linux.do/oauth2/authorize?state=state-123"},
+		{"id":"match","url":"https://ai.centos.hk/api/oauth/linuxdo?code=code-123&state=state-123"}
+	]`)
+
+	callbackURL, tabID, ok := oauthCallbackFromDevToolsTabs("https://ai.centos.hk", raw)
+	if !ok {
+		t.Fatal("expected NewAPI backend callback URL to be detected")
+	}
+	if callbackURL != "https://ai.centos.hk/api/oauth/linuxdo?code=code-123&state=state-123" {
 		t.Fatalf("callbackURL = %q", callbackURL)
 	}
 	if tabID != "match" {
@@ -53,6 +72,23 @@ func TestOAuthCallbackFromDevToolsEventFindsTransientCallbackRequest(t *testing.
 		t.Fatal("expected callback URL to be detected from network event")
 	}
 	if callbackURL != "https://x666.me/oauth/linuxdo?code=code-123&state=state-123" {
+		t.Fatalf("callbackURL = %q", callbackURL)
+	}
+}
+
+func TestOAuthCallbackFromDevToolsEventFindsNewAPIBackendCallbackRequest(t *testing.T) {
+	raw := []byte(`{
+		"method":"Network.requestWillBeSent",
+		"params":{
+			"request":{"url":"https://ai.centos.hk/api/oauth/linuxdo?code=code-123&state=state-123"}
+		}
+	}`)
+
+	callbackURL, ok := oauthCallbackFromDevToolsEvent("https://ai.centos.hk", raw)
+	if !ok {
+		t.Fatal("expected NewAPI backend callback URL to be detected from network event")
+	}
+	if callbackURL != "https://ai.centos.hk/api/oauth/linuxdo?code=code-123&state=state-123" {
 		t.Fatalf("callbackURL = %q", callbackURL)
 	}
 }
@@ -134,6 +170,39 @@ func TestWatchOAuthDevToolsTabEmitsTransientCallback(t *testing.T) {
 	case <-stopped:
 	case <-time.After(2 * time.Second):
 		t.Fatal("watcher did not stop browser after callback")
+	}
+}
+
+func TestCloseDevToolsTabRequestsMatchingTab(t *testing.T) {
+	closed := make(chan string, 1)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/json/close/") {
+			t.Fatalf("path = %q, want /json/close/<id>", r.URL.Path)
+		}
+		closed <- strings.TrimPrefix(r.URL.Path, "/json/close/")
+		_, _ = w.Write([]byte("Target is closing"))
+	})}
+	defer server.Close()
+	go func() {
+		_ = server.Serve(listener)
+	}()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	closeDevToolsTab(&http.Client{Timeout: time.Second}, port, "tab-123")
+
+	select {
+	case got := <-closed:
+		if got != "tab-123" {
+			t.Fatalf("closed tab = %q, want tab-123", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeDevToolsTab did not request tab close")
 	}
 }
 

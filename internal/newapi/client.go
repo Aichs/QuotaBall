@@ -159,7 +159,7 @@ func ExtractLinuxDoCallback(baseURL, callbackURL string) (OAuthCallback, error) 
 	if err != nil || cb.Scheme == "" || cb.Host == "" {
 		return OAuthCallback{}, errors.New("回调 URL 无效")
 	}
-	if !strings.EqualFold(cb.Host, baseParsed.Host) || cb.Path != "/oauth/linuxdo" {
+	if !strings.EqualFold(cb.Host, baseParsed.Host) || !isLinuxDoCallbackPath(cb.Path) {
 		return OAuthCallback{}, errors.New("回调 URL 与 NewAPI 网站不匹配")
 	}
 	code := strings.TrimSpace(cb.Query().Get("code"))
@@ -168,6 +168,10 @@ func ExtractLinuxDoCallback(baseURL, callbackURL string) (OAuthCallback, error) 
 		return OAuthCallback{}, errors.New("回调 URL 缺少 code 或 state")
 	}
 	return OAuthCallback{Code: code, State: state}, nil
+}
+
+func isLinuxDoCallbackPath(path string) bool {
+	return path == "/oauth/linuxdo" || path == "/api/oauth/linuxdo"
 }
 
 func (c *Client) Status(ctx context.Context) (Status, error) {

@@ -26,8 +26,10 @@ import (
 )
 
 const (
-	panelWidth  = 540
-	panelHeight = 820
+	panelWidth        = 540
+	panelHeight       = 820
+	loginWindowWidth  = 446
+	loginWindowHeight = 486
 )
 
 //go:embed all:frontend/src
@@ -74,16 +76,17 @@ func Run() error {
 	if err != nil {
 		return err
 	}
+	windowWidth, windowHeight := app.initialWindowSize()
 	frontend, err := fs.Sub(assets, "frontend/src")
 	if err != nil {
 		return err
 	}
 	return wails.Run(&options.App{
 		Title:             "Krill AI 额度监控",
-		Width:             panelWidth,
-		Height:            panelHeight,
-		MinWidth:          500,
-		MinHeight:         740,
+		Width:             windowWidth,
+		Height:            windowHeight,
+		MinWidth:          loginWindowWidth,
+		MinHeight:         loginWindowHeight,
 		MaxWidth:          panelWidth,
 		MaxHeight:         panelHeight,
 		DisableResize:     true,
@@ -154,6 +157,7 @@ func NewApp() (*App, error) {
 }
 
 func (a *App) startup(ctx context.Context) {
+	hasLogin := a.hasLoginState()
 	a.mu.Lock()
 	a.ctx = ctx
 	a.visible = true
@@ -161,14 +165,16 @@ func (a *App) startup(ctx context.Context) {
 	snap := a.snap
 	a.mu.Unlock()
 
-	a.positionWindow(ctx, cfg)
+	windowWidth, windowHeight := windowSizeForLoginState(hasLogin)
+	a.positionWindow(ctx, cfg, windowWidth, windowHeight)
+	a.syncWindowSize(windowWidth, windowHeight)
 	wailsruntime.WindowSetAlwaysOnTop(ctx, cfg.OnTop)
 	hideMainWindowFromTaskbar()
 	go a.commandLoop()
 	_ = a.ensureTrayController()
 	a.syncGlass(snap)
 	go a.scheduleLoop()
-	if a.hasLoginState() {
+	if hasLogin {
 		go func() {
 			_, _ = a.refresh(false)
 		}()
@@ -457,6 +463,7 @@ func (a *App) Logout() (SnapshotDTO, error) {
 	if tray != nil {
 		tray.SetSnapshot(snap)
 	}
+	a.syncWindowForSnapshot(snap)
 	a.emitSnapshot(snap)
 	return snapshotDTO(snap), err
 }
@@ -615,6 +622,7 @@ func (a *App) ShowPanel() error {
 		a.mu.Lock()
 		a.snap = snap
 		a.mu.Unlock()
+		a.syncWindowForSnapshot(snap)
 		a.syncGlass(snap)
 		a.syncTray(snap)
 		a.emitSnapshot(snap)
@@ -728,6 +736,7 @@ func (a *App) applySnapshot(snap krill.Snapshot, reveal bool) {
 	a.snap = snap
 	ctx := a.ctx
 	a.mu.Unlock()
+	a.syncWindowForSnapshot(snap)
 	a.syncGlass(snap)
 	a.syncTray(snap)
 	a.emitSnapshot(snap)
@@ -766,6 +775,49 @@ func (a *App) scheduleLoop() {
 		case <-a.stop:
 			return
 		}
+	}
+}
+
+func (a *App) initialWindowSize() (int, int) {
+	if a.hasLoginState() {
+		return panelWidth, panelHeight
+	}
+	a.mu.Lock()
+	snap := a.snap
+	a.mu.Unlock()
+	return windowSizeForSnapshot(snap)
+}
+
+func windowSizeForSnapshot(snap krill.Snapshot) (int, int) {
+	return windowSizeForLoginState(snap.LoggedIn)
+}
+
+func windowSizeForLoginState(loggedIn bool) (int, int) {
+	if loggedIn {
+		return panelWidth, panelHeight
+	}
+	return loginWindowWidth, loginWindowHeight
+}
+
+func (a *App) syncWindowForSnapshot(snap krill.Snapshot) {
+	a.syncWindowSize(windowSizeForSnapshot(snap))
+}
+
+func (a *App) syncWindowSize(width, height int) {
+	a.mu.Lock()
+	ctx := a.ctx
+	a.mu.Unlock()
+	if ctx == nil {
+		return
+	}
+	x, y := wailsruntime.WindowGetPosition(ctx)
+	wailsruntime.WindowSetSize(ctx, width, height)
+	screenW := int(win.GetSystemMetrics(win.SM_CXSCREEN))
+	screenH := int(win.GetSystemMetrics(win.SM_CYSCREEN))
+	nextX := clampInt(x, 14, maxInt(14, screenW-width-14))
+	nextY := clampInt(y, 14, maxInt(14, screenH-height-14))
+	if nextX != x || nextY != y {
+		wailsruntime.WindowSetPosition(ctx, nextX, nextY)
 	}
 }
 
@@ -973,8 +1025,8 @@ func (a *App) saveWindowPosition(ctx context.Context) error {
 	return err
 }
 
-func (a *App) positionWindow(ctx context.Context, cfg config.Config) {
-	x := int(win.GetSystemMetrics(win.SM_CXSCREEN)) - panelWidth - 24
+func (a *App) positionWindow(ctx context.Context, cfg config.Config, width int, height int) {
+	x := int(win.GetSystemMetrics(win.SM_CXSCREEN)) - width - 24
 	y := 70
 	if cfg.WX != nil && cfg.WY != nil {
 		x = *cfg.WX
@@ -982,8 +1034,8 @@ func (a *App) positionWindow(ctx context.Context, cfg config.Config) {
 	}
 	screenW := int(win.GetSystemMetrics(win.SM_CXSCREEN))
 	screenH := int(win.GetSystemMetrics(win.SM_CYSCREEN))
-	x = clampInt(x, 14, maxInt(14, screenW-panelWidth-14))
-	y = clampInt(y, 14, maxInt(14, screenH-panelHeight-14))
+	x = clampInt(x, 14, maxInt(14, screenW-width-14))
+	y = clampInt(y, 14, maxInt(14, screenH-height-14))
 	wailsruntime.WindowSetPosition(ctx, x, y)
 }
 

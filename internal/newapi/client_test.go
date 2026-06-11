@@ -63,6 +63,16 @@ func TestExtractLinuxDoCallbackRequiresMatchingBaseURLCodeAndState(t *testing.T)
 	}
 }
 
+func TestExtractLinuxDoCallbackAcceptsNewAPIBackendCallback(t *testing.T) {
+	cb, err := ExtractLinuxDoCallback("https://ai.centos.hk", "https://ai.centos.hk/api/oauth/linuxdo?code=abc&state=def")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cb.Code != "abc" || cb.State != "def" {
+		t.Fatalf("callback = %#v", cb)
+	}
+}
+
 func TestOAuthStatePreservesSessionCookieForCompletion(t *testing.T) {
 	var sawSessionCookie bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

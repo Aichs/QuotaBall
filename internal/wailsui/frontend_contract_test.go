@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"krill_monitor/internal/krill"
 )
 
 func TestFrontendHasLoggedOutRenderPathWithoutPanelShell(t *testing.T) {
@@ -209,6 +211,31 @@ func TestBackendShowPanelForcesLoginOnlyStateWhenLoggedOut(t *testing.T) {
 	showPanel := goSrc[start : start+end]
 	if !strings.Contains(showPanel, "!a.hasLoginState()") || !strings.Contains(showPanel, "loginRequiredMessage()") {
 		t.Fatalf("ShowPanel must force a logged-out snapshot before revealing the panel")
+	}
+}
+
+func TestBackendWindowSizeMatchesAuthState(t *testing.T) {
+	w, h := windowSizeForSnapshot(krill.Snapshot{LoggedIn: false})
+	if w != loginWindowWidth || h != loginWindowHeight {
+		t.Fatalf("logged-out window size = %dx%d, want %dx%d", w, h, loginWindowWidth, loginWindowHeight)
+	}
+
+	w, h = windowSizeForSnapshot(krill.Snapshot{LoggedIn: true})
+	if w != panelWidth || h != panelHeight {
+		t.Fatalf("logged-in window size = %dx%d, want %dx%d", w, h, panelWidth, panelHeight)
+	}
+}
+
+func TestFrontendLoggedOutRootUsesLoginDimensions(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(raw)
+	if !strings.Contains(css, ".login-root") ||
+		!strings.Contains(css, "width: 446px") ||
+		!strings.Contains(css, "height: 486px") {
+		t.Fatalf("logged-out root must match compact login window dimensions")
 	}
 }
 

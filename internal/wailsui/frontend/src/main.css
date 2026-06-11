@@ -32,6 +32,11 @@ label,
   background: transparent;
 }
 
+.login-root {
+  width: 446px;
+  height: 486px;
+}
+
 .shell,
 .dialog-shell {
   position: relative;

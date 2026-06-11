@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -261,7 +262,7 @@ func pollOAuthBrowser(ctx context.Context, port int, baseURL string, callbacks c
 			if err != nil {
 				continue
 			}
-			callbackURL, _, ok := oauthCallbackFromDevToolsTabs(baseURL, raw)
+			callbackURL, tabID, ok := oauthCallbackFromDevToolsTabs(baseURL, raw)
 			if !ok {
 				for _, tab := range devToolsTabs(raw) {
 					if strings.TrimSpace(tab.ID) == "" || strings.TrimSpace(tab.WebSocketDebuggerURL) == "" {
@@ -278,6 +279,7 @@ func pollOAuthBrowser(ctx context.Context, port int, baseURL string, callbacks c
 				}
 				continue
 			}
+			closeDevToolsTab(client, port, tabID)
 			emitOAuthCallback(callbackURL, callbacks, done, stop)
 			return
 		}
@@ -315,6 +317,7 @@ func watchOAuthDevToolsTab(ctx context.Context, websocketURL, baseURL string, ca
 		if !ok {
 			continue
 		}
+		_ = conn.WriteJSON(map[string]any{"id": 3, "method": "Page.close"})
 		emitOAuthCallback(callbackURL, callbacks, done, stop)
 		return
 	}
@@ -339,6 +342,18 @@ func fetchDevToolsTabs(client *http.Client, port int) ([]byte, error) {
 		return nil, fmt.Errorf("devtools status %d", resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func closeDevToolsTab(client *http.Client, port int, tabID string) {
+	tabID = strings.TrimSpace(tabID)
+	if client == nil || port <= 0 || tabID == "" {
+		return
+	}
+	resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/json/close/" + url.PathEscape(tabID))
+	if err != nil {
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 func devToolsTabs(raw []byte) []devToolsTab {
