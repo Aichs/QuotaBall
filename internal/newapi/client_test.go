@@ -104,6 +104,66 @@ func TestOAuthStatePreservesSessionCookieForCompletion(t *testing.T) {
 	}
 }
 
+func TestOAuthCompletionCanUseSessionOnlyLogin(t *testing.T) {
+	var sawOAuthSessionCookie bool
+	var sawLoggedInSessionCookie bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/oauth/state":
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "oauth-session", Path: "/", HttpOnly: true})
+			writeAPI(t, w, map[string]any{"success": true, "data": "state-123"})
+		case "/api/oauth/linuxdo":
+			if cookie, err := r.Cookie("session"); err == nil && cookie.Value == "oauth-session" {
+				sawOAuthSessionCookie = true
+			}
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "logged-in-session", Path: "/", HttpOnly: true})
+			writeAPI(t, w, map[string]any{"success": true, "data": map[string]any{
+				"id":       42,
+				"username": "linuxdo_user",
+			}})
+		case "/api/user/self":
+			if r.Header.Get("Authorization") != "" {
+				t.Fatalf("session-only NewAPI login must not send Authorization header")
+			}
+			if cookie, err := r.Cookie("session"); err == nil && cookie.Value == "logged-in-session" {
+				sawLoggedInSessionCookie = true
+			}
+			writeAPI(t, w, map[string]any{"success": true, "data": map[string]any{
+				"id":         42,
+				"username":   "linuxdo_user",
+				"quota":      900000,
+				"used_quota": 100000,
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := client.OAuthState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := client.CompleteLinuxDoOAuth(context.Background(), "code-123", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Token != "" || user.Username != "linuxdo_user" || !sawOAuthSessionCookie {
+		t.Fatalf("user=%#v sawOAuthSessionCookie=%v", user, sawOAuthSessionCookie)
+	}
+	self, err := client.UserSelf(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if self.Username != "linuxdo_user" || !sawLoggedInSessionCookie {
+		t.Fatalf("self=%#v sawLoggedInSessionCookie=%v", self, sawLoggedInSessionCookie)
+	}
+}
+
 func TestOAuthLogoutCanResetSessionBeforeState(t *testing.T) {
 	var sawLogout bool
 	var sawState bool

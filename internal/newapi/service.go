@@ -22,6 +22,7 @@ type Service struct {
 	baseURL       string
 	rememberLogin bool
 	memToken      string
+	sessionClient *Client
 	email         string
 	pending       *pendingOAuth
 }
@@ -44,6 +45,7 @@ func (s *Service) Configure(cfg config.Config) {
 	s.mu.Lock()
 	if s.baseURL != base {
 		s.memToken = ""
+		s.sessionClient = nil
 		s.email = ""
 		s.pending = nil
 	}
@@ -53,12 +55,20 @@ func (s *Service) Configure(cfg config.Config) {
 }
 
 func (s *Service) HasLoginState() bool {
-	return s.loadToken() != ""
+	if s.loadToken() != "" {
+		return true
+	}
+	s.mu.Lock()
+	hasSession := s.sessionClient != nil
+	base := s.baseURL
+	remember := s.rememberLogin
+	s.mu.Unlock()
+	return hasSession || remember && base != "" && s.savedSessionCookies(base) != ""
 }
 
 func (s *Service) HasSavedLoginState() bool {
 	base := s.currentBaseURL()
-	return base != "" && s.savedToken(base) != ""
+	return base != "" && (s.savedToken(base) != "" || s.savedSessionCookies(base) != "")
 }
 
 func (s *Service) StartLinuxDo(ctx context.Context, baseURL string, remember bool) (OAuthStart, error) {
@@ -86,6 +96,7 @@ func (s *Service) StartLinuxDo(ctx context.Context, baseURL string, remember boo
 	s.mu.Lock()
 	if s.baseURL != base {
 		s.memToken = ""
+		s.sessionClient = nil
 		s.email = ""
 	}
 	s.baseURL = base
@@ -132,22 +143,31 @@ func (s *Service) CompleteLinuxDo(ctx context.Context, baseURL, callbackURL stri
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
 	}
+	email := firstNonEmpty(user.Email, user.DisplayName, user.Username)
+	snap, err := s.fetchWith(ctx, pending.client, pending.status, user.Token, email)
+	if err != nil {
+		return krill.EmptySnapshot(err.Error()), err
+	}
 	s.mu.Lock()
 	s.baseURL = base
 	s.rememberLogin = remember
 	s.memToken = user.Token
-	s.email = firstNonEmpty(user.Email, user.Username)
+	if user.Token == "" {
+		s.sessionClient = pending.client
+	} else {
+		s.sessionClient = nil
+	}
+	s.email = email
 	s.pending = nil
 	s.mu.Unlock()
 	if remember && s.Secrets != nil {
-		if err := s.Secrets.Set(tokenKey(base), user.Token); err != nil {
+		if err := s.saveAuth(base, user.Token, pending.client, email); err != nil {
 			return krill.EmptySnapshot(err.Error()), err
 		}
-		_ = s.Secrets.Set(emailKey(base), firstNonEmpty(user.Email, user.Username))
 	} else {
 		s.clearSaved(base)
 	}
-	return s.fetchWith(ctx, pending.client, pending.status, user.Token, firstNonEmpty(user.Email, user.Username))
+	return snap, nil
 }
 
 func (s *Service) Fetch(ctx context.Context) (krill.Snapshot, error) {
@@ -156,25 +176,36 @@ func (s *Service) Fetch(ctx context.Context) (krill.Snapshot, error) {
 		return krill.EmptySnapshot(ErrAuthRequired.Error()), ErrAuthRequired
 	}
 	token := s.loadToken()
-	if token == "" {
-		return krill.EmptySnapshot(ErrAuthRequired.Error()), ErrAuthRequired
-	}
-	client, err := NewClient(base, nil)
+	client, err := s.clientForFetch(base, token)
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
+	}
+	if client == nil {
+		return krill.EmptySnapshot(ErrAuthRequired.Error()), ErrAuthRequired
 	}
 	status, err := client.Status(ctx)
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
 	}
 	email := s.emailSnapshot(base)
-	return s.fetchWith(ctx, client, status, token, email)
+	snap, err := s.fetchWith(ctx, client, status, token, email)
+	if err == nil && token == "" {
+		s.mu.Lock()
+		s.sessionClient = client
+		remember := s.rememberLogin
+		s.mu.Unlock()
+		if remember && s.Secrets != nil {
+			_ = s.saveAuth(base, "", client, snap.Email)
+		}
+	}
+	return snap, err
 }
 
 func (s *Service) Logout() {
 	base := s.currentBaseURL()
 	s.mu.Lock()
 	s.memToken = ""
+	s.sessionClient = nil
 	s.email = ""
 	s.pending = nil
 	s.mu.Unlock()
@@ -226,6 +257,34 @@ func (s *Service) loadToken() string {
 	return token
 }
 
+func (s *Service) clientForFetch(base, token string) (*Client, error) {
+	if token != "" {
+		return NewClient(base, nil)
+	}
+	s.mu.Lock()
+	client := s.sessionClient
+	remember := s.rememberLogin
+	s.mu.Unlock()
+	if client != nil {
+		return client, nil
+	}
+	if !remember {
+		return nil, nil
+	}
+	raw := s.savedSessionCookies(base)
+	if raw == "" {
+		return nil, nil
+	}
+	client, err := NewClient(base, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := client.ImportSessionCookies(raw); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
 func (s *Service) currentBaseURL() string {
 	s.mu.Lock()
 	base := s.baseURL
@@ -257,7 +316,45 @@ func (s *Service) clearSaved(baseURL string) {
 		return
 	}
 	_ = s.Secrets.Set(tokenKey(baseURL), "")
+	_ = s.Secrets.Set(sessionKey(baseURL), "")
 	_ = s.Secrets.Set(emailKey(baseURL), "")
+}
+
+func (s *Service) saveAuth(baseURL, token string, client *Client, email string) error {
+	if s.Secrets == nil || baseURL == "" {
+		return nil
+	}
+	if token != "" {
+		if err := s.Secrets.Set(tokenKey(baseURL), token); err != nil {
+			return err
+		}
+		_ = s.Secrets.Set(sessionKey(baseURL), "")
+	} else if client != nil {
+		cookies, err := client.ExportSessionCookies()
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(cookies) == "" {
+			return ErrAuthRequired
+		}
+		if err := s.Secrets.Set(sessionKey(baseURL), cookies); err != nil {
+			return err
+		}
+		_ = s.Secrets.Set(tokenKey(baseURL), "")
+	}
+	_ = s.Secrets.Set(emailKey(baseURL), strings.TrimSpace(email))
+	return nil
+}
+
+func (s *Service) savedSessionCookies(baseURL string) string {
+	if s.Secrets == nil || baseURL == "" {
+		return ""
+	}
+	cookies, err := s.Secrets.Get(sessionKey(baseURL))
+	if err != nil {
+		return ""
+	}
+	return cookies
 }
 
 func (s *Service) rememberEmail(email string) {
@@ -288,6 +385,10 @@ func (s *Service) emailSnapshot(baseURL string) string {
 
 func tokenKey(baseURL string) string {
 	return "newapi:" + baseHash(baseURL) + ":token"
+}
+
+func sessionKey(baseURL string) string {
+	return "newapi:" + baseHash(baseURL) + ":session"
 }
 
 func emailKey(baseURL string) string {

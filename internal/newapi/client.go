@@ -45,10 +45,11 @@ type OAuthCallback struct {
 }
 
 type User struct {
-	ID       int    `json:"id"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	Token    string `json:"token"`
+	ID          int    `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email"`
+	Token       string `json:"token"`
 }
 
 type UserSelf struct {
@@ -73,6 +74,11 @@ type apiResponse[T any] struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 	Data    T      `json:"data"`
+}
+
+type storedCookie struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 func NewClient(baseURL string, httpClient *http.Client) (*Client, error) {
@@ -187,10 +193,73 @@ func (c *Client) CompleteLinuxDoOAuth(ctx context.Context, code, state string) (
 	if err := c.do(ctx, http.MethodGet, path, "", nil, &user); err != nil {
 		return User{}, err
 	}
-	if strings.TrimSpace(user.Token) == "" {
-		return User{}, errors.New("NewAPI 登录成功但未返回用户 token")
-	}
 	return user, nil
+}
+
+func (c *Client) ExportSessionCookies() (string, error) {
+	if c == nil || c.HTTPClient == nil || c.HTTPClient.Jar == nil {
+		return "", nil
+	}
+	base, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return "", err
+	}
+	cookies := c.HTTPClient.Jar.Cookies(base)
+	stored := make([]storedCookie, 0, len(cookies))
+	for _, cookie := range cookies {
+		if cookie == nil || strings.TrimSpace(cookie.Name) == "" {
+			continue
+		}
+		stored = append(stored, storedCookie{Name: cookie.Name, Value: cookie.Value})
+	}
+	if len(stored) == 0 {
+		return "", nil
+	}
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func (c *Client) ImportSessionCookies(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var stored []storedCookie
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		return err
+	}
+	if c.HTTPClient == nil {
+		c.HTTPClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	if c.HTTPClient.Jar == nil {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			return err
+		}
+		c.HTTPClient.Jar = jar
+	}
+	base, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return err
+	}
+	cookies := make([]*http.Cookie, 0, len(stored))
+	for _, cookie := range stored {
+		if strings.TrimSpace(cookie.Name) == "" {
+			continue
+		}
+		cookies = append(cookies, &http.Cookie{
+			Name:  cookie.Name,
+			Value: cookie.Value,
+			Path:  "/",
+		})
+	}
+	if len(cookies) > 0 {
+		c.HTTPClient.Jar.SetCookies(base, cookies)
+	}
+	return nil
 }
 
 func (c *Client) Logout(ctx context.Context) error {
