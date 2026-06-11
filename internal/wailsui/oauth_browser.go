@@ -22,6 +22,8 @@ import (
 
 var startOAuthBrowserCapture = startDefaultOAuthBrowserCapture
 
+const oauthProfileDirEnv = "QUOTABALL_OAUTH_PROFILE_DIR"
+
 type oauthCapture struct {
 	Callbacks <-chan string
 	Done      <-chan struct{}
@@ -48,7 +50,7 @@ func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL 
 	if err != nil {
 		return nil, err
 	}
-	profileDir, err := os.MkdirTemp("", "quotaball-oauth-*")
+	profileDir, err := oauthBrowserProfileDir()
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +68,6 @@ func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL 
 	}
 	cmd := exec.CommandContext(ctx, browser, args...)
 	if err := cmd.Start(); err != nil {
-		_ = os.RemoveAll(profileDir)
 		return nil, fmt.Errorf("无法启动自动登录浏览器：%w", err)
 	}
 
@@ -74,7 +75,6 @@ func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL 
 	cleanup := func() {
 		once.Do(func() {
 			close(done)
-			_ = os.RemoveAll(profileDir)
 		})
 	}
 	go func() {
@@ -93,6 +93,26 @@ func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL 
 		Done:      done,
 		close:     stop,
 	}, nil
+}
+
+func oauthBrowserProfileDir() (string, error) {
+	if override := strings.TrimSpace(os.Getenv(oauthProfileDirEnv)); override != "" {
+		dir := filepath.Clean(override)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("无法创建自动登录浏览器资料目录：%w", err)
+		}
+		return dir, nil
+	}
+
+	root, err := os.UserCacheDir()
+	if err != nil || strings.TrimSpace(root) == "" {
+		root = os.TempDir()
+	}
+	dir := filepath.Join(root, "QuotaBall", "OAuthBrowser")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("无法创建自动登录浏览器资料目录：%w", err)
+	}
+	return dir, nil
 }
 
 func pollOAuthBrowser(ctx context.Context, port int, baseURL string, callbacks chan<- string, done <-chan struct{}, stop func()) {

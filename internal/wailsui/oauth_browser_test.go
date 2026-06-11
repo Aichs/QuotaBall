@@ -1,6 +1,9 @@
 package wailsui
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestOAuthCallbackFromDevToolsTabsFindsMatchingNewAPICallback(t *testing.T) {
 	raw := []byte(`[
@@ -27,5 +30,26 @@ func TestOAuthCallbackFromDevToolsTabsIgnoresOtherSites(t *testing.T) {
 
 	if callbackURL, tabID, ok := oauthCallbackFromDevToolsTabs("https://x666.me", raw); ok {
 		t.Fatalf("unexpected callbackURL=%q tabID=%q", callbackURL, tabID)
+	}
+}
+
+func TestOAuthBrowserProfileDirIsPersistent(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("QUOTABALL_OAUTH_PROFILE_DIR", root)
+
+	first, err := oauthBrowserProfileDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := oauthBrowserProfileDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first != second {
+		t.Fatalf("profile dir must be stable, got %q then %q", first, second)
+	}
+	if first != filepath.Clean(root) {
+		t.Fatalf("profile dir = %q, want override root %q", first, filepath.Clean(root))
 	}
 }

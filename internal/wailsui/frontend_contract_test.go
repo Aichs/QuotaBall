@@ -103,6 +103,9 @@ func TestFrontendNewAPIOAuthCommunicatesAutomaticCompletion(t *testing.T) {
 	if !strings.Contains(js, "授权完成后会自动登录") {
 		t.Fatalf("NewAPI login should tell the user that browser approval completes login automatically")
 	}
+	if !strings.Contains(js, "首次可能需要登录") || !strings.Contains(js, "当前浏览器登录态") {
+		t.Fatalf("NewAPI login should explain persistent automatic mode and current-browser manual mode")
+	}
 }
 
 func TestFrontendSnapshotUpdateKeepsLoginModalInSyncWithAuthState(t *testing.T) {

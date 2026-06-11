@@ -320,10 +320,10 @@ function renderProviderLoginFields(provider) {
       <input class="field" name="newapiBaseUrl" autocomplete="url" placeholder="NewAPI 网站地址，例如 https://x666.me" value="${escapeHTML(state.config.newapiBaseUrl || "")}" />
       <button class="oauth-button" type="button" data-action="newapi-start-oauth">${state.busy ? "打开中..." : "使用 LinuxDo 登录"}</button>
       ${state.oauthAuthorizeUrl ? `<button class="oauth-copy" type="button" data-action="copy-oauth-url">复制授权链接</button>` : ""}
-      <label class="check"><input type="checkbox" name="autoCallback" ${auto ? "checked" : ""} />自动完成登录</label>
+      <label class="check"><input type="checkbox" name="autoCallback" ${auto ? "checked" : ""} />自动完成登录（独立窗口）</label>
       <input class="field" name="callbackUrl" autocomplete="off" placeholder="粘贴登录完成后的回调 URL" />
       <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
-      <div class="oauth-note">${escapeHTML(state.oauthMessage || (auto ? "LinuxDo 授权完成后会自动登录。" : "登录完成后，如果浏览器停在 NewAPI 回调页，请复制地址栏完整 URL。"))}</div>
+      <div class="oauth-note">${escapeHTML(state.oauthMessage || (auto ? "LinuxDo 授权完成后会自动登录；首次可能需要登录，之后会记住。" : "使用当前浏览器登录态打开授权页；完成后请复制地址栏完整回调 URL。"))}</div>
     `;
   }
   if (provider === "sub2") {
@@ -550,8 +550,8 @@ async function startNewAPIOAuth(form) {
     state.config.newapiBaseUrl = started.baseUrl || baseUrl;
     state.oauthAuthorizeUrl = started.authorizeUrl || "";
     state.oauthMessage = started.autoCapture
-      ? "已打开 LinuxDo 授权页面，点允许后会自动登录。"
-      : "已打开 LinuxDo 授权页面。若出现 522，这是 LinuxDo 授权域异常；可复制授权链接稍后重试。";
+      ? "已打开独立授权窗口，LinuxDo 授权完成后会自动登录；首次可能需要登录，之后会记住。"
+      : "已用当前浏览器打开授权页。完成后请复制 NewAPI 回调页地址栏完整 URL。";
   } catch (err) {
     state.formError = String(err || "启动 LinuxDo 登录失败");
   } finally {
