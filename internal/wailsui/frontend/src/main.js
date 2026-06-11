@@ -24,6 +24,7 @@ const state = {
   busy: false,
   formError: "",
   oauthMessage: "",
+  oauthAuthorizeUrl: "",
 };
 
 const app = document.querySelector("#app");
@@ -316,6 +317,7 @@ function renderProviderLoginFields(provider) {
     return `
       <input class="field" name="newapiBaseUrl" autocomplete="url" placeholder="NewAPI 网站地址，例如 https://x666.me" value="${escapeHTML(state.config.newapiBaseUrl || "")}" />
       <button class="oauth-button" type="button" data-action="newapi-start-oauth">${state.busy ? "打开中..." : "使用 LinuxDo 登录"}</button>
+      ${state.oauthAuthorizeUrl ? `<button class="oauth-copy" type="button" data-action="copy-oauth-url">复制授权链接</button>` : ""}
       <input class="field" name="callbackUrl" autocomplete="off" placeholder="粘贴登录完成后的回调 URL" />
       <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
       <div class="oauth-note">${escapeHTML(state.oauthMessage || "登录完成后，如果浏览器停在 NewAPI 回调页，请复制地址栏完整 URL。")}</div>
@@ -406,6 +408,7 @@ async function onAction(event) {
     state.config.provider = event.currentTarget.dataset.provider || "krill";
     state.formError = "";
     state.oauthMessage = "";
+    state.oauthAuthorizeUrl = "";
     render();
     return;
   }
@@ -443,6 +446,8 @@ async function onAction(event) {
     render();
   } else if (action === "newapi-start-oauth") {
     await startNewAPIOAuth(event.currentTarget.closest("form"));
+  } else if (action === "copy-oauth-url") {
+    await copyOAuthAuthorizeURL();
   }
 }
 
@@ -527,6 +532,7 @@ async function startNewAPIOAuth(form) {
   state.busy = true;
   state.formError = "";
   state.oauthMessage = "";
+  state.oauthAuthorizeUrl = "";
   render();
   try {
     const started = await backend().StartNewAPIOAuth({
@@ -535,13 +541,27 @@ async function startNewAPIOAuth(form) {
     });
     state.config.provider = "newapi";
     state.config.newapiBaseUrl = started.baseUrl || baseUrl;
-    state.oauthMessage = "已打开 LinuxDo 授权页面，完成后粘贴回调 URL。";
+    state.oauthAuthorizeUrl = started.authorizeUrl || "";
+    state.oauthMessage = "已打开 LinuxDo 授权页面。若出现 522，这是 LinuxDo 授权域异常；可复制授权链接稍后重试。";
   } catch (err) {
     state.formError = String(err || "启动 LinuxDo 登录失败");
   } finally {
     state.busy = false;
     render();
   }
+}
+
+async function copyOAuthAuthorizeURL() {
+  if (!state.oauthAuthorizeUrl) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(state.oauthAuthorizeUrl);
+    state.oauthMessage = "授权链接已复制。LinuxDo 授权页恢复后，在浏览器打开该链接继续登录。";
+  } catch {
+    state.oauthMessage = state.oauthAuthorizeUrl;
+  }
+  render();
 }
 
 async function onNewAPIComplete(event) {
@@ -571,6 +591,7 @@ async function onNewAPIComplete(event) {
     state.config = { ...state.config, provider: "newapi", newapiBaseUrl: baseUrl, rememberLogin };
     state.modal = "";
     state.oauthMessage = "";
+    state.oauthAuthorizeUrl = "";
   } catch (err) {
     state.formError = String(err || "NewAPI 登录失败");
     state.modal = "login";

@@ -72,6 +72,24 @@ func TestFrontendNewAPIRememberCheckboxCanSendFalse(t *testing.T) {
 	}
 }
 
+func TestFrontendNewAPIOAuthKeepsAuthorizeURLForManualRetry(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	if !strings.Contains(js, "oauthAuthorizeUrl") {
+		t.Fatalf("frontend must keep the NewAPI authorize URL for manual retry/copy")
+	}
+	if !strings.Contains(js, `data-action="copy-oauth-url"`) {
+		t.Fatalf("NewAPI login should expose a copy-authorize-url fallback when LinuxDo is unreachable")
+	}
+	if !strings.Contains(js, `state.oauthAuthorizeUrl = started.authorizeUrl || "";`) {
+		t.Fatalf("StartNewAPIOAuth result must store authorizeUrl")
+	}
+}
+
 func TestFrontendSnapshotUpdateKeepsLoginModalInSyncWithAuthState(t *testing.T) {
 	raw, err := os.ReadFile("frontend/src/main.js")
 	if err != nil {
