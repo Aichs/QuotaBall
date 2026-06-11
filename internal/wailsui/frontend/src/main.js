@@ -1,0 +1,482 @@
+const state = {
+  config: {
+    email: "",
+    rememberLogin: true,
+    refreshSec: 60,
+    onTop: true,
+    glassEnabled: true,
+  },
+  snapshot: {
+    spend: 0,
+    wallet: 0,
+    req: "-",
+    cache: "-",
+    summary: {},
+    subscriptions: [],
+    timeLabel: "",
+    err: "正在检查登录状态...",
+    ok: false,
+    loggedIn: false,
+  },
+  modal: "",
+  busy: false,
+  formError: "",
+};
+
+const app = document.querySelector("#app");
+
+function backend() {
+  const root = window.go || {};
+  if (root.wailsui?.App) {
+    return root.wailsui.App;
+  }
+  for (const pkg of Object.values(root)) {
+    if (pkg?.App?.Bootstrap) {
+      return pkg.App;
+    }
+  }
+  return null;
+}
+
+async function waitForBackend() {
+  for (let i = 0; i < 200; i += 1) {
+    const api = backend();
+    if (api) {
+      return api;
+    }
+    await delay(25);
+  }
+  throw new Error("Wails backend is not ready");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function money(value, digits = 2) {
+  const n = Number(value || 0);
+  return `$${n.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+}
+
+function plainNumber(value, digits = 0) {
+  const n = Number(value || 0);
+  return `$${n.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+}
+
+function text(value, fallback = "") {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+  return String(value);
+}
+
+function escapeHTML(value) {
+  return text(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function pct(value) {
+  return Math.max(0, Math.min(100, Number(value || 0)));
+}
+
+function statCards(snapshot) {
+  const summary = snapshot.summary || {};
+  const totalDaily = Number(summary.totalDailyQuotaUsd || 0);
+  const forwardedRemaining = Number(summary.totalForwardedRemainingUsd || 0);
+  return [
+    {
+      title: "今日花费",
+      value: money(snapshot.spend, 2),
+      sub: `转结 ${money(forwardedRemaining, 2)} · 剩余 ${money(Math.max(0, totalDaily - Number(snapshot.spend || 0)), 2)}`,
+      color: "#ffad2f",
+    },
+    {
+      title: "钱包余额",
+      value: money(snapshot.wallet, 2),
+      sub: Number(snapshot.wallet || 0) === 0 ? "额度用完自动消耗" : "信用 + 福利",
+      color: "#28b8ff",
+    },
+    {
+      title: "日额度",
+      value: plainNumber(totalDaily, 0),
+      sub: `已用 ${money(snapshot.spend, 2)} / 总计 ${plainNumber(totalDaily, 0)}`,
+      color: "#31df9a",
+    },
+    {
+      title: "缓存率",
+      value: text(snapshot.cache, "-"),
+      sub: "缓存命中 / 请求数",
+      color: "#9b7cff",
+    },
+  ];
+}
+
+function renderDots() {
+  let html = "";
+  for (let i = 0; i < 18; i += 1) {
+    const x = 22 + ((i * 53) % (540 - 44));
+    const y = 24 + ((i * 37) % (820 - 48));
+    const alpha = i % 2 ? 0.07 : 0.1;
+    html += `<span class="dot" style="left:${x}px;top:${y}px;background:rgba(255,255,255,${alpha})"></span>`;
+  }
+  return html;
+}
+
+function render() {
+  const s = state.snapshot || {};
+  if (!s.loggedIn) {
+    app.innerHTML = renderLoggedOut(s);
+    bindEvents();
+    return;
+  }
+  app.innerHTML = renderMainPanel(s);
+  bindEvents();
+}
+
+function renderLoggedOut(_s) {
+  return `
+    <main class="root login-root">
+      ${renderLogin(false)}
+    </main>
+  `;
+}
+
+function renderMainPanel(s) {
+  const subs = Array.isArray(s.subscriptions) ? s.subscriptions : [];
+  return `
+    <main class="root">
+      <section class="shell">
+        <div class="dots">${renderDots()}</div>
+        <div class="panel">
+          ${renderHeader(s)}
+          <div class="error">${escapeHTML(s.err || "")}</div>
+          ${renderStats(s)}
+          <div class="section-row">
+            <div class="section-title">套餐</div>
+            <div class="muted">${subs.length} 张</div>
+            <div class="spacer"></div>
+          </div>
+          <div class="scroll">
+            <div class="subs">
+              ${subs.length ? subs.map(renderSub).join("") : `<div class="empty"></div>`}
+            </div>
+          </div>
+        </div>
+      </section>
+      ${renderModal()}
+    </main>
+  `;
+}
+
+function renderHeader(s) {
+  return `
+    <header class="header">
+      <div class="logo">◒</div>
+      <div class="brand">
+        <div class="title">Krill</div>
+        <div class="subtitle">额度监控</div>
+      </div>
+      <div class="time">${escapeHTML(s.timeLabel || "")}</div>
+      <div class="spacer"></div>
+      <button class="icon-btn" data-action="settings" title="设置">⚙</button>
+      <button class="icon-btn" data-action="refresh" title="立即刷新">↻</button>
+      <button class="icon-btn" data-action="hide" title="隐藏">—</button>
+      <button class="auth-btn" data-action="auth">${s.loggedIn ? "退出登录" : "登录"}</button>
+    </header>
+  `;
+}
+
+function renderStats(s) {
+  return `
+    <div class="stat-grid">
+      ${statCards(s).map((card) => `
+        <section class="stat-card">
+          <div class="stat-title">${card.title}</div>
+          <div class="stat-value" style="color:${card.color}">${escapeHTML(card.value)}</div>
+          <div class="stat-sub">${escapeHTML(card.sub)}</div>
+        </section>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderSub(sub) {
+  const routes = Array.isArray(sub.routes) ? sub.routes.slice(0, 6) : [];
+  return `
+    <section class="sub-card">
+      <div class="sub-top">
+        <div class="sub-name">${escapeHTML(text(sub.name, "套餐"))}</div>
+        <div class="badge">${escapeHTML(text(sub.daysLeftText, "? 天后到期"))}</div>
+      </div>
+      <div class="sub-detail">#${escapeHTML(sub.id)}  ·  ${escapeHTML(sub.start)} → ${escapeHTML(sub.end)}</div>
+      ${routes.length ? `<div class="routes">${routes.map((route) => `<span class="route">${escapeHTML(route)}</span>`).join("")}</div>` : ""}
+      ${renderQuota("转结", sub.forwardedUsed, sub.forwardedLimit, sub.forwardedPercent)}
+      ${renderQuota("当日", sub.dailyUsed, sub.dailyLimit, sub.dailyPercent)}
+    </section>
+  `;
+}
+
+function renderQuota(label, used, limit, percent) {
+  return `
+    <div class="quota">
+      <div class="quota-head">
+        <span>${label}</span>
+        <span>${money(used, 2)} / ${money(limit, 2)}</span>
+      </div>
+      <div class="bar"><div class="bar-fill" style="width:${pct(percent)}%"></div></div>
+    </div>
+  `;
+}
+
+function renderModal() {
+  if (state.modal === "login") {
+    return renderLogin();
+  }
+  if (state.modal === "settings") {
+    return renderSettings();
+  }
+  return `<div class="modal" hidden></div>`;
+}
+
+function renderLogin(asModal = true) {
+  const err = state.formError || "";
+  const body = `
+    <form class="dialog login" data-form="login">
+      <div class="dialog-shell">
+        <div class="dots">${renderDialogDots(430, 350)}</div>
+        <div class="dialog-content">
+          <div class="dialog-brand">
+            <div class="login-orb">◒</div>
+            <div>
+              <div class="dialog-title">登录 Krill AI</div>
+              <div class="subtitle">额度监控</div>
+            </div>
+            <div class="spacer"></div>
+          </div>
+          <div class="glass-line"></div>
+          <input class="field" name="email" autocomplete="username" placeholder="邮箱" value="${escapeHTML(state.config.email || "")}" />
+          <input class="field" name="password" autocomplete="current-password" placeholder="密码" type="password" />
+          <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+          <div class="error">${escapeHTML(err)}</div>
+          <div class="dialog-buttons">
+            <button class="secondary" type="button" data-action="cancel-modal">取消</button>
+            <button class="primary" type="submit">${state.busy ? "登录中..." : "登录"}</button>
+          </div>
+        </div>
+      </div>
+    </form>
+  `;
+  if (!asModal) {
+    return `<div class="login-stage">${body}</div>`;
+  }
+  return `
+    <div class="modal">
+      ${body}
+    </div>
+  `;
+}
+
+function renderSettings() {
+  const cfg = state.config || {};
+  return `
+    <div class="modal">
+      <form class="dialog settings" data-form="settings">
+        <div class="dialog-shell">
+          <div class="dots">${renderDialogDots(360, 320)}</div>
+          <div class="dialog-content">
+            <div class="dialog-title">设置</div>
+            <div class="number-field">
+              <input class="field" name="refreshSec" min="3" max="3600" type="number" value="${Number(cfg.refreshSec || 60)}" />
+              <span class="field-suffix">秒刷新</span>
+            </div>
+            <label class="check"><input type="checkbox" name="onTop" ${cfg.onTop ? "checked" : ""} />窗口置顶</label>
+            <label class="check"><input type="checkbox" name="glassEnabled" ${cfg.glassEnabled ? "checked" : ""} />显示玻璃球</label>
+            <label class="check"><input type="checkbox" name="remember" ${cfg.rememberLogin ? "checked" : ""} />记住登录状态</label>
+            <div class="dialog-buttons">
+              <button class="secondary" type="button" data-action="cancel-modal">取消</button>
+              <button class="primary" type="submit">保存</button>
+            </div>
+          </div>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+function renderDialogDots(w, h) {
+  let html = "";
+  for (let i = 0; i < 12; i += 1) {
+    const x = 22 + ((i * 53) % Math.max(1, w - 44));
+    const y = 24 + ((i * 37) % Math.max(1, h - 48));
+    html += `<span class="dot" style="left:${x}px;top:${y}px"></span>`;
+  }
+  return html;
+}
+
+function bindEvents() {
+  for (const btn of app.querySelectorAll("[data-action]")) {
+    btn.addEventListener("click", onAction);
+  }
+  const login = app.querySelector('[data-form="login"]');
+  if (login) {
+    login.addEventListener("submit", onLogin);
+  }
+  const settings = app.querySelector('[data-form="settings"]');
+  if (settings) {
+    settings.addEventListener("submit", onSettings);
+  }
+}
+
+async function onAction(event) {
+  const action = event.currentTarget.dataset.action;
+  const api = backend();
+  if (!api) {
+    return;
+  }
+  if (action === "settings") {
+    state.formError = "";
+    state.modal = "settings";
+    render();
+  } else if (action === "refresh") {
+    await callRefresh();
+  } else if (action === "hide") {
+    await api.HidePanel();
+  } else if (action === "auth") {
+    if (state.snapshot.loggedIn) {
+      const snap = await api.Logout();
+      state.snapshot = snap;
+      state.modal = "login";
+      state.formError = "";
+      render();
+    } else {
+      state.formError = "";
+      state.modal = "login";
+      render();
+    }
+  } else if (action === "cancel-modal") {
+    if (!state.snapshot.loggedIn) {
+      await api.HidePanel();
+      return;
+    }
+    state.modal = "";
+    state.formError = "";
+    render();
+  }
+}
+
+async function callRefresh() {
+  const api = backend();
+  if (!api || state.busy) {
+    return;
+  }
+  state.busy = true;
+  try {
+    const snap = await api.Refresh();
+    state.snapshot = snap;
+    if (!snap.loggedIn) {
+      state.modal = "login";
+    }
+  } catch (err) {
+    state.snapshot = { ...state.snapshot, err: String(err || "刷新失败") };
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function onLogin(event) {
+  event.preventDefault();
+  if (state.busy) {
+    return;
+  }
+  const form = new FormData(event.currentTarget);
+  const email = text(form.get("email")).trim();
+  const password = text(form.get("password"));
+  const rememberLogin = form.get("remember") === "on";
+  if (!email || !password) {
+    state.formError = "请输入邮箱和密码";
+    render();
+    return;
+  }
+  state.busy = true;
+  state.formError = "";
+  render();
+  try {
+    const snap = await backend().Login({ email, password, rememberLogin });
+    state.snapshot = snap;
+    state.config = { ...state.config, email, rememberLogin };
+    state.modal = "";
+  } catch (err) {
+    state.formError = String(err || "登录失败");
+    state.modal = "login";
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function onSettings(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const refreshSec = Math.max(3, Math.min(3600, Number(form.get("refreshSec") || 60)));
+  const payload = {
+    refreshSec,
+    onTop: form.get("onTop") === "on",
+    glassEnabled: form.get("glassEnabled") === "on",
+    rememberLogin: form.get("remember") === "on",
+  };
+  try {
+    const cfg = await backend().SaveSettings(payload);
+    state.config = cfg;
+    state.modal = "";
+  } catch (err) {
+    state.formError = String(err || "保存失败");
+  }
+  render();
+}
+
+async function boot() {
+  render();
+  const api = await waitForBackend();
+  if (window.runtime?.EventsOn) {
+    window.runtime.EventsOn("snapshot:update", (snap) => {
+      state.snapshot = snap;
+      if (snap.loggedIn && state.modal === "login") {
+        state.modal = "";
+      }
+      if (!snap.loggedIn) {
+        state.modal = "login";
+      }
+      render();
+    });
+  }
+  const initial = await api.Bootstrap();
+  state.config = initial.config;
+  state.snapshot = initial.snapshot;
+  if (!state.snapshot.loggedIn) {
+    state.modal = "login";
+  }
+  render();
+  window.addEventListener("mouseup", () => {
+    const active = document.activeElement;
+    if (active && ["INPUT", "BUTTON"].includes(active.tagName)) {
+      return;
+    }
+    backend()?.SaveWindowPosition?.();
+  });
+}
+
+boot().catch((err) => {
+  state.snapshot = { ...state.snapshot, err: String(err || "启动失败") };
+  render();
+});

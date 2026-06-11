@@ -1,0 +1,544 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  color: #183545;
+  user-select: none;
+}
+
+button,
+input,
+label,
+.scroll {
+  --wails-draggable: no-drag;
+}
+
+.root {
+  width: 540px;
+  height: 820px;
+  position: relative;
+  background: transparent;
+}
+
+.shell,
+.dialog-shell {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 96px 20px, rgba(255, 255, 255, 0.69), rgba(255, 255, 255, 0.21) 55%, rgba(255, 255, 255, 0) 100%),
+    radial-gradient(circle at calc(100% - 18px) calc(100% - 18px), rgba(0, 64, 96, 0.34), rgba(11, 158, 193, 0.16) 55%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0) 58%, rgba(12, 124, 162, 0.18)),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.85) 0%, rgba(236, 253, 255, 0.76) 30%, rgba(184, 236, 248, 0.68) 66%, rgba(98, 192, 221, 0.64) 100%);
+  border: 1.35px solid rgba(255, 255, 255, 0.83);
+}
+
+.shell::before,
+.dialog-shell::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 12px;
+  height: 46%;
+  border-radius: 14px;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.64), rgba(255, 255, 255, 0.05));
+}
+
+.shell::after,
+.dialog-shell::after {
+  content: "";
+  position: absolute;
+  inset: 1.8px;
+  border-radius: inherit;
+  border: 1.05px solid rgba(42, 189, 224, 0.52);
+  pointer-events: none;
+}
+
+.dots {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.dot {
+  position: absolute;
+  width: 1.4px;
+  height: 1.4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.shell {
+  width: 540px;
+  height: 820px;
+  border-radius: 22px;
+  padding: 16px 20px 18px;
+  --wails-draggable: drag;
+}
+
+.panel {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 2px;
+  min-height: 42px;
+}
+
+.logo {
+  color: #08bfd7;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  padding-right: 2px;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 86px;
+}
+
+.title {
+  color: #071d2d;
+  font-size: 18px;
+  line-height: 22px;
+  font-weight: 800;
+}
+
+.subtitle {
+  color: rgba(58, 96, 112, 0.67);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.time {
+  color: rgba(73, 110, 124, 0.67);
+  font-size: 12px;
+  min-width: 54px;
+  margin-left: 2px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 14px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: #1c6682;
+  background: rgba(255, 255, 255, 0.28);
+  border: 1px solid rgba(121, 205, 225, 0.35);
+  font-family: "Segoe UI Symbol", "Microsoft YaHei UI", sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: default;
+}
+
+.icon-btn:hover {
+  background: rgba(214, 250, 255, 0.59);
+}
+
+.auth-btn {
+  min-width: 56px;
+  height: 30px;
+  padding: 4px 2px;
+  color: #ec5f48;
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: default;
+}
+
+.error {
+  color: #d94848;
+  background: rgba(255, 255, 255, 0.31);
+  border: 1px solid rgba(255, 150, 150, 0.35);
+  border-radius: 8px;
+  padding: 7px;
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.error:empty {
+  display: none;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.stat-card {
+  min-height: 92px;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.73), rgba(233, 252, 255, 0.49) 56%, rgba(188, 237, 248, 0.36));
+  border: 1px solid rgba(82, 196, 226, 0.5);
+}
+
+.stat-title {
+  color: rgba(52, 89, 105, 0.65);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.stat-value {
+  margin-top: 2px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 20px;
+  line-height: 30px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat-sub {
+  color: rgba(54, 89, 105, 0.67);
+  font-size: 10px;
+  line-height: 14px;
+  overflow-wrap: anywhere;
+}
+
+.section-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px 0;
+}
+
+.section-title {
+  color: #092437;
+  font-size: 15px;
+  line-height: 24px;
+  font-weight: 800;
+}
+
+.muted {
+  color: rgba(73, 110, 124, 0.67);
+  font-size: 12px;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 360px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  margin: 2px;
+}
+
+.scroll::-webkit-scrollbar-thumb {
+  background: rgba(28, 160, 196, 0.44);
+  border-radius: 4px;
+}
+
+.subs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sub-card {
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.8), rgba(248, 254, 255, 0.62) 52%, rgba(199, 241, 250, 0.48));
+  border: 1px solid rgba(82, 196, 226, 0.46);
+}
+
+.sub-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sub-name {
+  color: #0b2638;
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 800;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  min-width: 100px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  color: #087056;
+  background: rgba(176, 255, 222, 0.59);
+  border-radius: 8px;
+  padding: 0 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.sub-detail {
+  margin-top: 3px;
+  color: rgba(73, 110, 124, 0.72);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.routes {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 5px;
+  margin-top: 5px;
+  overflow: hidden;
+}
+
+.route {
+  max-width: 110px;
+  height: 20px;
+  line-height: 16px;
+  color: #23566b;
+  background: rgba(222, 248, 252, 0.63);
+  border: 1px solid rgba(110, 200, 220, 0.35);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quota {
+  margin-top: 8px;
+}
+
+.quota-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(73, 110, 124, 0.78);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.quota-head span:last-child {
+  flex: 1;
+  text-align: right;
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+.bar {
+  width: 100%;
+  height: 7px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(7, 34, 58, 0.11);
+}
+
+.bar-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #0ea5ff, #53f2ff);
+}
+
+.empty {
+  height: 120px;
+}
+
+.modal {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  background: rgba(238, 252, 255, 0.12);
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.dialog {
+  padding: 8px;
+  background: transparent;
+}
+
+.dialog-shell {
+  --wails-draggable: drag;
+  border-radius: 28px;
+  padding: 24px 26px;
+}
+
+.dialog.login .dialog-shell {
+  width: 430px;
+  height: 350px;
+}
+
+.dialog.settings .dialog-shell {
+  width: 360px;
+  height: 320px;
+  border-radius: 24px;
+  padding: 20px 22px;
+}
+
+.dialog-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+.dialog-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.login-orb {
+  color: #08bfd7;
+  font-size: 32px;
+  line-height: 36px;
+  font-weight: 800;
+  padding-right: 4px;
+}
+
+.dialog-title {
+  color: #071d2d;
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 900;
+}
+
+.glass-line {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.75) 22%, rgba(91, 224, 245, 0.53) 52%, rgba(255, 255, 255, 0));
+}
+
+.field {
+  width: 100%;
+  min-height: 42px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(102, 190, 212, 0.61);
+  border-radius: 12px;
+  padding: 11px 12px;
+  color: #173346;
+  font-size: 13px;
+  outline: none;
+}
+
+.field:focus {
+  border-color: rgba(15, 181, 220, 0.86);
+  background: rgba(255, 255, 255, 0.93);
+}
+
+.number-field {
+  position: relative;
+}
+
+.number-field .field {
+  padding-right: 78px;
+}
+
+.field-suffix {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(49, 88, 106, 0.78);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #31586a;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.check input {
+  width: 15px;
+  height: 15px;
+  accent-color: #15c7e8;
+}
+
+.dialog-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.dialog-buttons button {
+  flex: 1;
+  min-height: 42px;
+  border-radius: 12px;
+  padding: 11px 14px;
+  font-weight: 800;
+  font-size: 13px;
+  cursor: default;
+}
+
+.primary {
+  color: #ffffff;
+  border: 0;
+  background: linear-gradient(90deg, #0ea5ff, #1ed7d5);
+}
+
+.secondary {
+  color: #24556a;
+  background: rgba(255, 255, 255, 0.63);
+  border: 1px solid rgba(102, 190, 212, 0.39);
+}
+
+.dialog .error {
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.45);
+  border-color: rgba(255, 150, 150, 0.43);
+}

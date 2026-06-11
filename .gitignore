@@ -1,0 +1,21 @@
+.krill_token
+.krill_secret.json
+.krill_panel_state.json
+.krill_widget_state.json
+.krill_widget_cmd.jsonl
+.krill_panel_cmd.jsonl
+__pycache__/
+build/
+dist/
+*.pyc
+*.exe
+config.json
+.planning/
+.codegraph/
+nul
+
+# Legacy Python build artifacts kept locally but not published with the Go app.
+Krill-Monitor.spec
+requirements.txt
+krill_monitor.py
+build.bat
