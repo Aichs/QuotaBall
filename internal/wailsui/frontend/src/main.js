@@ -1,6 +1,8 @@
 const state = {
   config: {
+    provider: "krill",
     email: "",
+    newapiBaseUrl: "",
     rememberLogin: true,
     refreshSec: 60,
     onTop: true,
@@ -21,6 +23,7 @@ const state = {
   modal: "",
   busy: false,
   formError: "",
+  oauthMessage: "",
 };
 
 const app = document.querySelector("#app");
@@ -250,27 +253,29 @@ function renderModal() {
 
 function renderLogin(asModal = true) {
   const err = state.formError || "";
+  const provider = state.config.provider || "krill";
+  const formName = provider === "newapi" ? "newapi-complete" : "login";
+  const title = provider === "newapi" ? "登录 NewAPI" : provider === "sub2" ? "登录 Sub2" : "登录 Krill AI";
   const body = `
-    <form class="dialog login" data-form="login">
+    <form class="dialog login" data-form="${formName}">
       <div class="dialog-shell">
-        <div class="dots">${renderDialogDots(430, 350)}</div>
+        <div class="dots">${renderDialogDots(430, 430)}</div>
         <div class="dialog-content">
           <div class="dialog-brand">
             <div class="login-orb">◒</div>
             <div>
-              <div class="dialog-title">登录 Krill AI</div>
+              <div class="dialog-title">${title}</div>
               <div class="subtitle">额度监控</div>
             </div>
             <div class="spacer"></div>
           </div>
           <div class="glass-line"></div>
-          <input class="field" name="email" autocomplete="username" placeholder="邮箱" value="${escapeHTML(state.config.email || "")}" />
-          <input class="field" name="password" autocomplete="current-password" placeholder="密码" type="password" />
-          <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+          ${renderProviderTabs(provider)}
+          ${renderProviderLoginFields(provider)}
           <div class="error">${escapeHTML(err)}</div>
           <div class="dialog-buttons">
             <button class="secondary" type="button" data-action="cancel-modal">取消</button>
-            <button class="primary" type="submit">${state.busy ? "登录中..." : "登录"}</button>
+            ${renderLoginPrimaryButton(provider)}
           </div>
         </div>
       </div>
@@ -284,6 +289,59 @@ function renderLogin(asModal = true) {
       ${body}
     </div>
   `;
+}
+
+function renderProviderTabs(provider) {
+  const providers = [
+    ["newapi", "NewAPI"],
+    ["sub2", "Sub2"],
+    ["krill", "Krill AI"],
+  ];
+  return `
+    <div class="provider-tabs">
+      ${providers.map(([value, label]) => `
+        <button
+          class="provider-tab ${provider === value ? "active" : ""}"
+          type="button"
+          data-action="provider"
+          data-provider="${value}"
+        >${label}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderProviderLoginFields(provider) {
+  if (provider === "newapi") {
+    return `
+      <input class="field" name="newapiBaseUrl" autocomplete="url" placeholder="NewAPI 网站地址，例如 https://x666.me" value="${escapeHTML(state.config.newapiBaseUrl || "")}" />
+      <button class="oauth-button" type="button" data-action="newapi-start-oauth">${state.busy ? "打开中..." : "使用 LinuxDo 登录"}</button>
+      <input class="field" name="callbackUrl" autocomplete="off" placeholder="粘贴登录完成后的回调 URL" />
+      <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+      <div class="oauth-note">${escapeHTML(state.oauthMessage || "登录完成后，如果浏览器停在 NewAPI 回调页，请复制地址栏完整 URL。")}</div>
+    `;
+  }
+  if (provider === "sub2") {
+    return `
+      <div class="provider-placeholder">Sub2 支持暂未开放</div>
+      <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+    `;
+  }
+  return `
+    <input class="field" name="email" autocomplete="username" placeholder="邮箱" value="${escapeHTML(state.config.email || "")}" />
+    <input class="field" name="password" autocomplete="current-password" placeholder="密码" type="password" />
+    <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+  `;
+}
+
+function renderLoginPrimaryButton(provider) {
+  if (provider === "newapi") {
+    return `<button class="primary" type="submit">${state.busy ? "验证中..." : "完成登录"}</button>`;
+  }
+  if (provider === "sub2") {
+    return `<button class="primary" type="button" disabled>暂未开放</button>`;
+  }
+  return `<button class="primary" type="submit">${state.busy ? "登录中..." : "登录"}</button>`;
 }
 
 function renderSettings() {
@@ -331,6 +389,10 @@ function bindEvents() {
   if (login) {
     login.addEventListener("submit", onLogin);
   }
+  const newapi = app.querySelector('[data-form="newapi-complete"]');
+  if (newapi) {
+    newapi.addEventListener("submit", onNewAPIComplete);
+  }
   const settings = app.querySelector('[data-form="settings"]');
   if (settings) {
     settings.addEventListener("submit", onSettings);
@@ -339,6 +401,14 @@ function bindEvents() {
 
 async function onAction(event) {
   const action = event.currentTarget.dataset.action;
+  if (action === "provider") {
+    syncLoginFormState(event.currentTarget.closest("form"));
+    state.config.provider = event.currentTarget.dataset.provider || "krill";
+    state.formError = "";
+    state.oauthMessage = "";
+    render();
+    return;
+  }
   const api = backend();
   if (!api) {
     return;
@@ -371,6 +441,8 @@ async function onAction(event) {
     state.modal = "";
     state.formError = "";
     render();
+  } else if (action === "newapi-start-oauth") {
+    await startNewAPIOAuth(event.currentTarget.closest("form"));
   }
 }
 
@@ -396,6 +468,9 @@ async function callRefresh() {
 
 async function onLogin(event) {
   event.preventDefault();
+  if ((state.config.provider || "krill") !== "krill") {
+    return;
+  }
   if (state.busy) {
     return;
   }
@@ -412,12 +487,92 @@ async function onLogin(event) {
   state.formError = "";
   render();
   try {
-    const snap = await backend().Login({ email, password, rememberLogin });
+    const snap = await backend().Login({ provider: "krill", email, password, rememberLogin });
     state.snapshot = snap;
     state.config = { ...state.config, email, rememberLogin };
     state.modal = "";
   } catch (err) {
     state.formError = String(err || "登录失败");
+    state.modal = "login";
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+function syncLoginFormState(form) {
+  if (!form) {
+    return;
+  }
+  const data = new FormData(form);
+  if (form.querySelector('input[name="remember"]')) {
+    state.config.rememberLogin = data.get("remember") === "on";
+  }
+  if (data.has("newapiBaseUrl")) {
+    state.config.newapiBaseUrl = text(data.get("newapiBaseUrl")).trim();
+  }
+}
+
+async function startNewAPIOAuth(form) {
+  if (state.busy) {
+    return;
+  }
+  syncLoginFormState(form);
+  const baseUrl = state.config.newapiBaseUrl || "";
+  if (!baseUrl) {
+    state.formError = "请输入 NewAPI 网站地址";
+    render();
+    return;
+  }
+  state.busy = true;
+  state.formError = "";
+  state.oauthMessage = "";
+  render();
+  try {
+    const started = await backend().StartNewAPIOAuth({
+      baseUrl,
+      rememberLogin: state.config.rememberLogin,
+    });
+    state.config.provider = "newapi";
+    state.config.newapiBaseUrl = started.baseUrl || baseUrl;
+    state.oauthMessage = "已打开 LinuxDo 授权页面，完成后粘贴回调 URL。";
+  } catch (err) {
+    state.formError = String(err || "启动 LinuxDo 登录失败");
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function onNewAPIComplete(event) {
+  event.preventDefault();
+  if (state.busy) {
+    return;
+  }
+  const form = new FormData(event.currentTarget);
+  const baseUrl = text(form.get("newapiBaseUrl")).trim();
+  const callbackUrl = text(form.get("callbackUrl")).trim();
+  const rememberLogin = form.get("remember") === "on";
+  if (!baseUrl || !callbackUrl) {
+    state.formError = "请输入网站地址并粘贴回调 URL";
+    render();
+    return;
+  }
+  state.busy = true;
+  state.formError = "";
+  render();
+  try {
+    const snap = await backend().CompleteNewAPIOAuth({
+      baseUrl,
+      callbackUrl,
+      rememberLogin,
+    });
+    state.snapshot = snap;
+    state.config = { ...state.config, provider: "newapi", newapiBaseUrl: baseUrl, rememberLogin };
+    state.modal = "";
+    state.oauthMessage = "";
+  } catch (err) {
+    state.formError = String(err || "NewAPI 登录失败");
     state.modal = "login";
   } finally {
     state.busy = false;
@@ -434,6 +589,8 @@ async function onSettings(event) {
     onTop: form.get("onTop") === "on",
     glassEnabled: form.get("glassEnabled") === "on",
     rememberLogin: form.get("remember") === "on",
+    provider: state.config.provider || "krill",
+    newapiBaseUrl: state.config.newapiBaseUrl || "",
   };
   try {
     const cfg = await backend().SaveSettings(payload);
@@ -461,7 +618,9 @@ async function boot() {
     });
   }
   const initial = await api.Bootstrap();
-  state.config = initial.config;
+  state.config = { ...state.config, ...initial.config };
+  state.config.provider ||= "krill";
+  state.config.newapiBaseUrl ||= "";
   state.snapshot = initial.snapshot;
   if (!state.snapshot.loggedIn) {
     state.modal = "login";

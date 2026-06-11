@@ -413,7 +413,7 @@ label,
 
 .dialog.login .dialog-shell {
   width: 430px;
-  height: 350px;
+  height: 430px;
 }
 
 .dialog.settings .dialog-shell {
@@ -457,6 +457,64 @@ label,
   height: 3px;
   border-radius: 2px;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.75) 22%, rgba(91, 224, 245, 0.53) 52%, rgba(255, 255, 255, 0));
+}
+
+.provider-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.provider-tab {
+  min-height: 34px;
+  border-radius: 10px;
+  color: #2c6174;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(102, 190, 212, 0.38);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: default;
+}
+
+.provider-tab.active {
+  color: #ffffff;
+  background: linear-gradient(90deg, #0ea5ff, #1ed7d5);
+  border-color: rgba(255, 255, 255, 0.7);
+}
+
+.oauth-button {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 12px;
+  color: #0d6178;
+  background: rgba(226, 253, 255, 0.82);
+  border: 1px solid rgba(63, 190, 220, 0.57);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: default;
+}
+
+.oauth-button:hover {
+  background: rgba(214, 250, 255, 0.94);
+}
+
+.oauth-note,
+.provider-placeholder {
+  min-height: 40px;
+  border-radius: 10px;
+  padding: 9px 10px;
+  color: rgba(49, 88, 106, 0.78);
+  background: rgba(255, 255, 255, 0.42);
+  border: 1px solid rgba(102, 190, 212, 0.31);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.provider-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 118px;
+  color: rgba(49, 88, 106, 0.62);
 }
 
 .field {
@@ -529,6 +587,11 @@ label,
   color: #ffffff;
   border: 0;
   background: linear-gradient(90deg, #0ea5ff, #1ed7d5);
+}
+
+.primary:disabled {
+  color: rgba(255, 255, 255, 0.82);
+  background: linear-gradient(90deg, #9eb9c6, #b3cdd4);
 }
 
 .secondary {

@@ -27,6 +27,51 @@ func TestFrontendHasLoggedOutRenderPathWithoutPanelShell(t *testing.T) {
 	}
 }
 
+func TestFrontendLoginSupportsProviderSelectionWithoutChangingKrillDefault(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	if !strings.Contains(js, `provider: "krill"`) {
+		t.Fatalf("frontend config state must default to the existing Krill AI provider")
+	}
+	for _, want := range []string{"NewAPI", "Sub2", "Krill AI"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("login UI must expose provider option %q", want)
+		}
+	}
+	if !strings.Contains(js, `data-action="newapi-start-oauth"`) ||
+		!strings.Contains(js, `data-form="newapi-complete"`) {
+		t.Fatalf("NewAPI login must provide OAuth start and callback completion controls")
+	}
+}
+
+func TestFrontendNewAPIRememberCheckboxCanSendFalse(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	start := strings.Index(js, "function syncLoginFormState")
+	if start < 0 {
+		t.Fatalf("frontend must define syncLoginFormState")
+	}
+	end := strings.Index(js[start:], "async function startNewAPIOAuth")
+	if end < 0 {
+		t.Fatalf("syncLoginFormState test could not find function boundary")
+	}
+	syncLoginFormState := js[start : start+end]
+	if strings.Contains(syncLoginFormState, `data.has("remember")`) {
+		t.Fatalf("remember checkbox state must be read even when unchecked; unchecked checkboxes are absent from FormData")
+	}
+	if !strings.Contains(syncLoginFormState, `state.config.rememberLogin = data.get("remember") === "on";`) {
+		t.Fatalf("syncLoginFormState must be able to set rememberLogin to false")
+	}
+}
+
 func TestFrontendSnapshotUpdateKeepsLoginModalInSyncWithAuthState(t *testing.T) {
 	raw, err := os.ReadFile("frontend/src/main.js")
 	if err != nil {
@@ -63,6 +108,27 @@ func TestBackendGlassSyncRequiresLoggedInSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(syncGlass, "show := enabled && snap.LoggedIn") {
 		t.Fatalf("glass ball should only show when enabled and logged in")
+	}
+}
+
+func TestBackendShowPanelForcesLoginOnlyStateWhenLoggedOut(t *testing.T) {
+	raw, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goSrc := string(raw)
+
+	start := strings.Index(goSrc, "func (a *App) ShowPanel")
+	if start < 0 {
+		t.Fatalf("backend must define ShowPanel")
+	}
+	end := strings.Index(goSrc[start:], "func (a *App) TogglePanel")
+	if end < 0 {
+		t.Fatalf("ShowPanel test could not find function boundary")
+	}
+	showPanel := goSrc[start : start+end]
+	if !strings.Contains(showPanel, "!a.hasLoginState()") || !strings.Contains(showPanel, "loginRequiredMessage()") {
+		t.Fatalf("ShowPanel must force a logged-out snapshot before revealing the panel")
 	}
 }
 

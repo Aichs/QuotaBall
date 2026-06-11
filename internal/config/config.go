@@ -4,18 +4,26 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
 	ThemeLight = "light"
 	ThemeDark  = "dark"
+
+	ProviderKrill  = "krill"
+	ProviderNewAPI = "newapi"
+	ProviderSub2   = "sub2"
 )
 
 type Config struct {
 	Email         string  `json:"email"`
 	Password      string  `json:"password"`
+	Provider      string  `json:"provider"`
+	NewAPIBaseURL string  `json:"newapi_base_url"`
 	RememberLogin bool    `json:"remember_login"`
 	RefreshSec    int     `json:"refresh_sec"`
 	Opacity       float64 `json:"opacity"`
@@ -31,6 +39,7 @@ type Config struct {
 
 func Default() Config {
 	return Config{
+		Provider:      ProviderKrill,
 		RememberLogin: true,
 		RefreshSec:    60,
 		Opacity:       0.96,
@@ -71,6 +80,7 @@ func Load(path string) (Config, error) {
 
 func Save(path string, cfg Config) error {
 	cfg.Normalize()
+	cfg.Password = ""
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -82,6 +92,12 @@ func Save(path string, cfg Config) error {
 }
 
 func (c *Config) Normalize() {
+	switch c.Provider {
+	case ProviderKrill, ProviderNewAPI:
+	default:
+		c.Provider = ProviderKrill
+	}
+	c.NewAPIBaseURL = normalizeBaseURL(c.NewAPIBaseURL)
 	if c.RefreshSec < 3 {
 		c.RefreshSec = 3
 	}
@@ -94,6 +110,21 @@ func (c *Config) Normalize() {
 	if c.TbarMetric != "forwarded" {
 		c.TbarMetric = "daily"
 	}
+}
+
+func normalizeBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return strings.TrimRight(raw, "/")
+	}
+	u.Path = strings.TrimRight(u.EscapedPath(), "/")
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 func migrateLegacy(raw map[string]json.RawMessage) {

@@ -17,18 +17,39 @@ type AppStateDTO struct {
 type LoginRequest struct {
 	Email         string `json:"email"`
 	Password      string `json:"password"`
+	Provider      string `json:"provider"`
+	RememberLogin bool   `json:"rememberLogin"`
+}
+
+type NewAPIOAuthStartRequest struct {
+	BaseURL       string `json:"baseUrl"`
+	RememberLogin bool   `json:"rememberLogin"`
+}
+
+type NewAPIOAuthStartDTO struct {
+	BaseURL      string `json:"baseUrl"`
+	AuthorizeURL string `json:"authorizeUrl"`
+}
+
+type NewAPIOAuthCompleteRequest struct {
+	BaseURL       string `json:"baseUrl"`
+	CallbackURL   string `json:"callbackUrl"`
 	RememberLogin bool   `json:"rememberLogin"`
 }
 
 type SettingsRequest struct {
-	RefreshSec    int  `json:"refreshSec"`
-	OnTop         bool `json:"onTop"`
-	GlassEnabled  bool `json:"glassEnabled"`
-	RememberLogin bool `json:"rememberLogin"`
+	RefreshSec    int    `json:"refreshSec"`
+	OnTop         bool   `json:"onTop"`
+	GlassEnabled  bool   `json:"glassEnabled"`
+	RememberLogin bool   `json:"rememberLogin"`
+	Provider      string `json:"provider"`
+	NewAPIBaseURL string `json:"newapiBaseUrl"`
 }
 
 type PublicConfigDTO struct {
 	Email         string  `json:"email"`
+	Provider      string  `json:"provider"`
+	NewAPIBaseURL string  `json:"newapiBaseUrl"`
 	RememberLogin bool    `json:"rememberLogin"`
 	RefreshSec    int     `json:"refreshSec"`
 	Opacity       float64 `json:"opacity"`
@@ -97,6 +118,8 @@ func configDTO(cfg config.Config, hasSavedLogin bool) PublicConfigDTO {
 	cfg.Normalize()
 	return PublicConfigDTO{
 		Email:         cfg.Email,
+		Provider:      cfg.Provider,
+		NewAPIBaseURL: cfg.NewAPIBaseURL,
 		RememberLogin: cfg.RememberLogin,
 		RefreshSec:    cfg.RefreshSec,
 		Opacity:       cfg.Opacity,
