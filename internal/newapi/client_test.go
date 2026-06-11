@@ -104,6 +104,43 @@ func TestOAuthStatePreservesSessionCookieForCompletion(t *testing.T) {
 	}
 }
 
+func TestOAuthLogoutCanResetSessionBeforeState(t *testing.T) {
+	var sawLogout bool
+	var sawState bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/user/logout":
+			sawLogout = true
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "reset-session", Path: "/", HttpOnly: true})
+			writeAPI(t, w, map[string]any{"success": true, "data": nil})
+		case "/api/oauth/state":
+			sawState = true
+			if cookie, err := r.Cookie("session"); err != nil || cookie.Value != "reset-session" {
+				t.Fatalf("state request did not reuse reset session cookie")
+			}
+			writeAPI(t, w, map[string]any{"success": true, "data": "state-123"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Logout(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, err := client.OAuthState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != "state-123" || !sawLogout || !sawState {
+		t.Fatalf("state=%q sawLogout=%v sawState=%v", state, sawLogout, sawState)
+	}
+}
+
 func TestUserSelfMapsQuotaSnapshot(t *testing.T) {
 	now := time.Date(2026, 6, 11, 10, 30, 0, 0, time.UTC)
 	user := UserSelf{

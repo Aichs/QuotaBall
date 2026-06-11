@@ -77,6 +77,7 @@ func (s *Service) StartLinuxDo(ctx context.Context, baseURL string, remember boo
 	if !status.LinuxDoOAuth || strings.TrimSpace(status.LinuxDoClientID) == "" {
 		return OAuthStart{}, errors.New("该 NewAPI 站点未启用 LinuxDo 登录")
 	}
+	_ = client.Logout(ctx)
 	state, err := client.OAuthState(ctx)
 	if err != nil {
 		return OAuthStart{}, err

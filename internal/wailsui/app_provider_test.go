@@ -149,6 +149,22 @@ func TestSaveSettingsDoesNotActivateSub2Placeholder(t *testing.T) {
 	}
 }
 
+func TestNextOAuthCallbackPrefersBufferedCallbackWhenBrowserDone(t *testing.T) {
+	callbacks := make(chan string, 1)
+	callbacks <- "https://x666.me/oauth/linuxdo?code=code-123&state=state-123"
+	done := make(chan struct{})
+	close(done)
+	appStop := make(chan struct{})
+
+	callbackURL, ok := nextOAuthCallback(callbacks, done, appStop)
+	if !ok {
+		t.Fatal("expected buffered callback to win over closed browser done channel")
+	}
+	if callbackURL != "https://x666.me/oauth/linuxdo?code=code-123&state=state-123" {
+		t.Fatalf("callbackURL = %q", callbackURL)
+	}
+}
+
 func stubOAuthCapture(t *testing.T, callbacks <-chan string, onStart func(authorizeURL, baseURL string)) func() {
 	t.Helper()
 	old := startOAuthBrowserCapture

@@ -11,11 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"krill_monitor/internal/newapi"
 )
@@ -23,6 +26,10 @@ import (
 var startOAuthBrowserCapture = startDefaultOAuthBrowserCapture
 
 const oauthProfileDirEnv = "QUOTABALL_OAUTH_PROFILE_DIR"
+const oauthDebugPortEnv = "QUOTABALL_OAUTH_DEBUG_PORT"
+const defaultOAuthDebugPort = 27183
+
+var debugPortPattern = regexp.MustCompile(`--remote-debugging-port=(\d+)`)
 
 type oauthCapture struct {
 	Callbacks <-chan string
@@ -37,8 +44,9 @@ func (c *oauthCapture) Close() {
 }
 
 type devToolsTab struct {
-	ID  string `json:"id"`
-	URL string `json:"url"`
+	ID                   string `json:"id"`
+	URL                  string `json:"url"`
+	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 }
 
 func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL string) (*oauthCapture, error) {
@@ -46,46 +54,48 @@ func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL 
 	if err != nil {
 		return nil, err
 	}
-	port, err := freeLoopbackPort()
-	if err != nil {
-		return nil, err
-	}
 	profileDir, err := oauthBrowserProfileDir()
 	if err != nil {
 		return nil, err
 	}
+	port := runningOAuthBrowserDebugPort(profileDir)
+	if port == 0 {
+		port, err = oauthBrowserDebugPort()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	callbacks := make(chan string, 1)
 	done := make(chan struct{})
+	var cmd *exec.Cmd
 	args := []string{
 		"--new-window",
 		"--remote-debugging-address=127.0.0.1",
 		"--remote-debugging-port=" + strconv.Itoa(port),
+		"--remote-allow-origins=*",
 		"--user-data-dir=" + profileDir,
 		"--no-first-run",
 		"--no-default-browser-check",
 		authorizeURL,
 	}
-	cmd := exec.CommandContext(ctx, browser, args...)
+	cmd = exec.CommandContext(ctx, browser, args...)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("无法启动自动登录浏览器：%w", err)
 	}
 
 	var once sync.Once
-	cleanup := func() {
+	stop := func() {
 		once.Do(func() {
 			close(done)
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 		})
 	}
 	go func() {
 		_ = cmd.Wait()
-		cleanup()
 	}()
-	stop := func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	}
 	go pollOAuthBrowser(ctx, port, baseURL, callbacks, done, stop)
 
 	return &oauthCapture{
@@ -93,6 +103,20 @@ func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL 
 		Done:      done,
 		close:     stop,
 	}, nil
+}
+
+func oauthBrowserDebugPort() (int, error) {
+	if override := strings.TrimSpace(os.Getenv(oauthDebugPortEnv)); override != "" {
+		port, err := strconv.Atoi(override)
+		if err != nil || port <= 0 || port > 65535 {
+			return 0, errors.New("自动登录浏览器调试端口无效")
+		}
+		return port, nil
+	}
+	if loopbackPortAvailable(defaultOAuthDebugPort) || devToolsPortActive(defaultOAuthDebugPort) {
+		return defaultOAuthDebugPort, nil
+	}
+	return freeLoopbackPort()
 }
 
 func oauthBrowserProfileDir() (string, error) {
@@ -115,9 +139,70 @@ func oauthBrowserProfileDir() (string, error) {
 	return dir, nil
 }
 
+func runningOAuthBrowserDebugPort(profileDir string) int {
+	if runtime.GOOS != "windows" {
+		return 0
+	}
+	out, err := exec.Command("wmic", "process", "where", "name='msedge.exe' or name='chrome.exe'", "get", "CommandLine", "/value").Output()
+	if err == nil {
+		if port := debugPortFromProcessList(profileDir, string(out)); port != 0 {
+			return port
+		}
+	}
+	ps := "Get-CimInstance Win32_Process -Filter \"name='msedge.exe' or name='chrome.exe'\" | ForEach-Object { $_.CommandLine }"
+	out, err = exec.Command("powershell", "-NoProfile", "-Command", ps).Output()
+	if err != nil {
+		return 0
+	}
+	return debugPortFromProcessList(profileDir, string(out))
+}
+
+func debugPortFromProcessList(profileDir, raw string) int {
+	profile := normalizeProfilePath(profileDir)
+	if profile == "" {
+		return 0
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		normalized := normalizeCommandLine(line)
+		if !strings.Contains(normalized, profile) {
+			continue
+		}
+		match := debugPortPattern.FindStringSubmatch(line)
+		if len(match) != 2 {
+			continue
+		}
+		port, err := strconv.Atoi(match[1])
+		if err == nil && port > 0 && port <= 65535 {
+			return port
+		}
+	}
+	return 0
+}
+
+func normalizeProfilePath(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, `"`, "")
+	value = strings.ReplaceAll(value, `/`, `\`)
+	value = filepath.Clean(value)
+	if value == "." {
+		return ""
+	}
+	return value
+}
+
+func normalizeCommandLine(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, `"`, "")
+	value = strings.ReplaceAll(value, `/`, `\`)
+	return value
+}
+
 func pollOAuthBrowser(ctx context.Context, port int, baseURL string, callbacks chan<- string, done <-chan struct{}, stop func()) {
 	client := &http.Client{Timeout: 2 * time.Second}
-	ticker := time.NewTicker(350 * time.Millisecond)
+	watcherCtx, cancelWatchers := context.WithCancel(ctx)
+	defer cancelWatchers()
+	watchedTabs := map[string]struct{}{}
+	ticker := time.NewTicker(150 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -133,17 +218,66 @@ func pollOAuthBrowser(ctx context.Context, port int, baseURL string, callbacks c
 			}
 			callbackURL, _, ok := oauthCallbackFromDevToolsTabs(baseURL, raw)
 			if !ok {
+				for _, tab := range devToolsTabs(raw) {
+					if strings.TrimSpace(tab.ID) == "" || strings.TrimSpace(tab.WebSocketDebuggerURL) == "" {
+						continue
+					}
+					if _, exists := watchedTabs[tab.ID]; exists {
+						continue
+					}
+					watchedTabs[tab.ID] = struct{}{}
+					go watchOAuthDevToolsTab(watcherCtx, tab.WebSocketDebuggerURL, baseURL, callbacks, done, stop)
+				}
 				continue
 			}
-			select {
-			case callbacks <- callbackURL:
-			case <-done:
-			default:
-			}
-			stop()
+			emitOAuthCallback(callbackURL, callbacks, done, stop)
 			return
 		}
 	}
+}
+
+func watchOAuthDevToolsTab(ctx context.Context, websocketURL, baseURL string, callbacks chan<- string, done <-chan struct{}, stop func()) {
+	dialer := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
+	conn, _, err := dialer.DialContext(ctx, websocketURL, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_ = conn.WriteJSON(map[string]any{"id": 1, "method": "Network.enable"})
+	_ = conn.WriteJSON(map[string]any{"id": 2, "method": "Page.enable"})
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		default:
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return
+		}
+		callbackURL, ok := oauthCallbackFromDevToolsEvent(baseURL, raw)
+		if !ok {
+			continue
+		}
+		emitOAuthCallback(callbackURL, callbacks, done, stop)
+		return
+	}
+}
+
+func emitOAuthCallback(callbackURL string, callbacks chan<- string, done <-chan struct{}, stop func()) {
+	select {
+	case callbacks <- callbackURL:
+	case <-done:
+	default:
+	}
+	stop()
 }
 
 func fetchDevToolsTabs(client *http.Client, port int) ([]byte, error) {
@@ -158,12 +292,16 @@ func fetchDevToolsTabs(client *http.Client, port int) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func oauthCallbackFromDevToolsTabs(baseURL string, raw []byte) (string, string, bool) {
+func devToolsTabs(raw []byte) []devToolsTab {
 	var tabs []devToolsTab
 	if err := json.Unmarshal(raw, &tabs); err != nil {
-		return "", "", false
+		return nil
 	}
-	for _, tab := range tabs {
+	return tabs
+}
+
+func oauthCallbackFromDevToolsTabs(baseURL string, raw []byte) (string, string, bool) {
+	for _, tab := range devToolsTabs(raw) {
 		if strings.TrimSpace(tab.URL) == "" {
 			continue
 		}
@@ -172,6 +310,56 @@ func oauthCallbackFromDevToolsTabs(baseURL string, raw []byte) (string, string, 
 		}
 	}
 	return "", "", false
+}
+
+type devToolsEvent struct {
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+}
+
+func oauthCallbackFromDevToolsEvent(baseURL string, raw []byte) (string, bool) {
+	var event devToolsEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return "", false
+	}
+	if !strings.HasPrefix(event.Method, "Network.") && !strings.HasPrefix(event.Method, "Page.") {
+		return "", false
+	}
+	for _, candidate := range devToolsEventURLs(event.Params) {
+		if _, err := newapi.ExtractLinuxDoCallback(baseURL, candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func devToolsEventURLs(raw json.RawMessage) []string {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	var urls []string
+	collectDevToolsURLs(value, &urls)
+	return urls
+}
+
+func collectDevToolsURLs(value any, urls *[]string) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if strings.EqualFold(key, "url") {
+				if s, ok := child.(string); ok && strings.TrimSpace(s) != "" {
+					*urls = append(*urls, s)
+				}
+				continue
+			}
+			collectDevToolsURLs(child, urls)
+		}
+	case []any:
+		for _, child := range v {
+			collectDevToolsURLs(child, urls)
+		}
+	}
 }
 
 func findOAuthBrowser() (string, error) {
@@ -220,4 +408,23 @@ func freeLoopbackPort() (int, error) {
 		return 0, errors.New("无法分配本地浏览器调试端口")
 	}
 	return addr.Port, nil
+}
+
+func loopbackPortAvailable(port int) bool {
+	listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		return false
+	}
+	_ = listener.Close()
+	return true
+}
+
+func devToolsPortActive(port int) bool {
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/json/version")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }

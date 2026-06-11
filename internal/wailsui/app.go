@@ -448,23 +448,33 @@ func (a *App) Logout() (SnapshotDTO, error) {
 }
 
 func (a *App) waitNewAPIOAuthCallback(baseURL string, remember bool, capture *oauthCapture) {
+	callbackURL, ok := nextOAuthCallback(capture.Callbacks, capture.Done, a.stop)
+	if !ok || strings.TrimSpace(callbackURL) == "" {
+		return
+	}
+	_, err := a.CompleteNewAPIOAuth(NewAPIOAuthCompleteRequest{
+		BaseURL:       baseURL,
+		CallbackURL:   callbackURL,
+		RememberLogin: remember,
+	})
+	if err != nil {
+		a.emitOAuthError(err.Error())
+	}
+}
+
+func nextOAuthCallback(callbacks <-chan string, done <-chan struct{}, appStop <-chan struct{}) (string, bool) {
 	select {
-	case callbackURL, ok := <-capture.Callbacks:
-		if !ok || strings.TrimSpace(callbackURL) == "" {
-			return
+	case callbackURL, ok := <-callbacks:
+		return callbackURL, ok
+	case <-done:
+		select {
+		case callbackURL, ok := <-callbacks:
+			return callbackURL, ok
+		default:
+			return "", false
 		}
-		_, err := a.CompleteNewAPIOAuth(NewAPIOAuthCompleteRequest{
-			BaseURL:       baseURL,
-			CallbackURL:   callbackURL,
-			RememberLogin: remember,
-		})
-		if err != nil {
-			a.emitOAuthError(err.Error())
-		}
-	case <-capture.Done:
-		return
-	case <-a.stop:
-		return
+	case <-appStop:
+		return "", false
 	}
 }
 

@@ -193,6 +193,10 @@ func (c *Client) CompleteLinuxDoOAuth(ctx context.Context, code, state string) (
 	return user, nil
 }
 
+func (c *Client) Logout(ctx context.Context) error {
+	return c.do(ctx, http.MethodGet, "/api/user/logout", "", nil, nil)
+}
+
 func (c *Client) UserSelf(ctx context.Context, token string) (UserSelf, error) {
 	var user UserSelf
 	err := c.do(ctx, http.MethodGet, "/api/user/self", token, nil, &user)
