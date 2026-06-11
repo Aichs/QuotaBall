@@ -61,7 +61,7 @@ func (s *Service) HasSavedLoginState() bool {
 	return base != "" && s.savedToken(base) != ""
 }
 
-func (s *Service) StartLinuxDo(ctx context.Context, baseURL string, remember bool) (OAuthStart, error) {
+func (s *Service) StartLinuxDo(ctx context.Context, baseURL string, remember bool, redirectURI ...string) (OAuthStart, error) {
 	base, err := NormalizeBaseURL(baseURL)
 	if err != nil {
 		return OAuthStart{}, err
@@ -99,7 +99,7 @@ func (s *Service) StartLinuxDo(ctx context.Context, baseURL string, remember boo
 
 	return OAuthStart{
 		BaseURL:      base,
-		AuthorizeURL: LinuxDoAuthorizeURL(status.LinuxDoClientID, state),
+		AuthorizeURL: LinuxDoAuthorizeURL(status.LinuxDoClientID, state, redirectURI...),
 	}, nil
 }
 

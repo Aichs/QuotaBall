@@ -24,11 +24,13 @@ type LoginRequest struct {
 type NewAPIOAuthStartRequest struct {
 	BaseURL       string `json:"baseUrl"`
 	RememberLogin bool   `json:"rememberLogin"`
+	AutoCallback  bool   `json:"autoCallback"`
 }
 
 type NewAPIOAuthStartDTO struct {
 	BaseURL      string `json:"baseUrl"`
 	AuthorizeURL string `json:"authorizeUrl"`
+	AutoCapture  bool   `json:"autoCapture"`
 }
 
 type NewAPIOAuthCompleteRequest struct {

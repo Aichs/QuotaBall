@@ -44,6 +44,11 @@ func TestLinuxDoAuthorizeURLMatchesNewAPISiteFlow(t *testing.T) {
 	if strings.Contains(got, "redirect_uri=") {
 		t.Fatalf("LinuxDo URL should not add redirect_uri; NewAPI sites configure it server-side: %q", got)
 	}
+
+	withRedirect := LinuxDoAuthorizeURL("client-id", "state-value", "http://127.0.0.1:27182/oauth/linuxdo")
+	if !strings.Contains(withRedirect, "redirect_uri=http%3A%2F%2F127.0.0.1%3A27182%2Foauth%2Flinuxdo") {
+		t.Fatalf("authorize URL should support an explicit local redirect_uri for owned LinuxDo apps: %q", withRedirect)
+	}
 }
 
 func TestExtractLinuxDoCallbackRequiresMatchingBaseURLCodeAndState(t *testing.T) {
@@ -53,6 +58,14 @@ func TestExtractLinuxDoCallbackRequiresMatchingBaseURLCodeAndState(t *testing.T)
 	}
 	if cb.Code != "abc" || cb.State != "def" {
 		t.Fatalf("callback = %#v", cb)
+	}
+
+	local, err := ExtractLinuxDoCallback("https://x666.me", "http://127.0.0.1:27182/oauth/linuxdo?code=abc&state=def")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if local.Code != "abc" || local.State != "def" {
+		t.Fatalf("local callback = %#v", local)
 	}
 
 	if _, err := ExtractLinuxDoCallback("https://x666.me", "https://other.example/oauth/linuxdo?code=abc&state=def"); err == nil {

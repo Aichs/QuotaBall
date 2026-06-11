@@ -90,6 +90,21 @@ func TestFrontendNewAPIOAuthKeepsAuthorizeURLForManualRetry(t *testing.T) {
 	}
 }
 
+func TestFrontendNewAPIOAuthCommunicatesAutomaticCompletion(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	if !strings.Contains(js, "autoCapture") {
+		t.Fatalf("frontend must read the backend automatic OAuth capture flag")
+	}
+	if !strings.Contains(js, "授权完成后会自动登录") {
+		t.Fatalf("NewAPI login should tell the user that browser approval completes login automatically")
+	}
+}
+
 func TestFrontendSnapshotUpdateKeepsLoginModalInSyncWithAuthState(t *testing.T) {
 	raw, err := os.ReadFile("frontend/src/main.js")
 	if err != nil {

@@ -413,7 +413,11 @@ label,
 
 .dialog.login .dialog-shell {
   width: 430px;
-  height: 430px;
+  height: 470px;
+}
+
+.dialog.login .dialog-content {
+  gap: 8px;
 }
 
 .dialog.settings .dialog-shell {

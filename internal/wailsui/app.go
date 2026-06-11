@@ -52,6 +52,7 @@ type App struct {
 	commands chan appCommand
 	glass    *ui.GlassController
 	tray     *ui.TrayController
+	oauth    *oauthCapture
 }
 
 type appCommandKind int
@@ -195,12 +196,17 @@ func (a *App) shutdown() {
 	a.glass = nil
 	tray := a.tray
 	a.tray = nil
+	oauth := a.oauth
+	a.oauth = nil
 	a.mu.Unlock()
 	if glass != nil {
 		glass.Close()
 	}
 	if tray != nil {
 		tray.Close()
+	}
+	if oauth != nil {
+		oauth.Close()
 	}
 }
 
@@ -332,20 +338,38 @@ func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (NewAPIOAuthStartDTO
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	start, err := a.newSvc.StartLinuxDo(ctx, baseURL, req.RememberLogin)
+	var capture *oauthCapture
+	var redirectURI string
+	var err error
+	if req.AutoCallback {
+		capture, err = startOAuthCallback(context.Background())
+		if err != nil {
+			return NewAPIOAuthStartDTO{}, err
+		}
+		redirectURI = capture.RedirectURI
+	}
+	start, err := a.newSvc.StartLinuxDo(ctx, baseURL, req.RememberLogin, redirectURI)
 	if err != nil {
+		if capture != nil {
+			capture.Close()
+		}
 		return NewAPIOAuthStartDTO{}, err
 	}
 
 	a.mu.Lock()
 	wailsCtx := a.ctx
 	a.mu.Unlock()
+	if capture != nil {
+		a.replaceOAuthCapture(capture)
+		go a.waitNewAPIOAuthCallback(start.BaseURL, req.RememberLogin, capture)
+	}
 	if wailsCtx != nil {
 		wailsruntime.BrowserOpenURL(wailsCtx, start.AuthorizeURL)
 	}
 	return NewAPIOAuthStartDTO{
 		BaseURL:      start.BaseURL,
 		AuthorizeURL: start.AuthorizeURL,
+		AutoCapture:  capture != nil,
 	}, nil
 }
 
@@ -386,7 +410,12 @@ func (a *App) CompleteNewAPIOAuth(req NewAPIOAuthCompleteRequest) (SnapshotDTO, 
 	a.cfg.Password = ""
 	a.authGen++
 	cfg := a.cfg
+	oauth := a.oauth
+	a.oauth = nil
 	a.mu.Unlock()
+	if oauth != nil {
+		oauth.Close()
+	}
 	a.newSvc.Configure(cfg)
 	if err := config.Save(a.paths.Config, cfg); err != nil {
 		return SnapshotDTO{}, err
@@ -396,6 +425,7 @@ func (a *App) CompleteNewAPIOAuth(req NewAPIOAuthCompleteRequest) (SnapshotDTO, 
 }
 
 func (a *App) Logout() (SnapshotDTO, error) {
+	a.stopOAuthCapture()
 	if a.activeProvider() == config.ProviderNewAPI {
 		a.newSvc.Logout()
 	} else {
@@ -422,6 +452,56 @@ func (a *App) Logout() (SnapshotDTO, error) {
 	}
 	a.emitSnapshot(snap)
 	return snapshotDTO(snap), err
+}
+
+func (a *App) waitNewAPIOAuthCallback(baseURL string, remember bool, capture *oauthCapture) {
+	select {
+	case callbackURL, ok := <-capture.Callbacks:
+		if !ok || strings.TrimSpace(callbackURL) == "" {
+			return
+		}
+		_, err := a.CompleteNewAPIOAuth(NewAPIOAuthCompleteRequest{
+			BaseURL:       baseURL,
+			CallbackURL:   callbackURL,
+			RememberLogin: remember,
+		})
+		if err != nil {
+			a.emitOAuthError(err.Error())
+		}
+	case <-capture.Done:
+		return
+	case <-a.stop:
+		return
+	}
+}
+
+func (a *App) replaceOAuthCapture(capture *oauthCapture) {
+	a.mu.Lock()
+	old := a.oauth
+	a.oauth = capture
+	a.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+func (a *App) stopOAuthCapture() {
+	a.mu.Lock()
+	oauth := a.oauth
+	a.oauth = nil
+	a.mu.Unlock()
+	if oauth != nil {
+		oauth.Close()
+	}
+}
+
+func (a *App) emitOAuthError(message string) {
+	a.mu.Lock()
+	ctx := a.ctx
+	a.mu.Unlock()
+	if ctx != nil {
+		wailsruntime.EventsEmit(ctx, "oauth:error", message)
+	}
 }
 
 func (a *App) Refresh() (SnapshotDTO, error) {
