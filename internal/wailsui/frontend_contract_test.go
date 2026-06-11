@@ -85,8 +85,8 @@ func TestFrontendNewAPIOAuthKeepsAuthorizeURLForManualRetry(t *testing.T) {
 	if !strings.Contains(js, `data-action="copy-oauth-url"`) {
 		t.Fatalf("NewAPI login should expose a copy-authorize-url fallback when LinuxDo is unreachable")
 	}
-	if !strings.Contains(js, `state.oauthAuthorizeUrl = started.authorizeUrl || "";`) {
-		t.Fatalf("StartNewAPIOAuth result must store authorizeUrl")
+	if !strings.Contains(js, `started.autoCapture ? "" : (started.authorizeUrl || "")`) {
+		t.Fatalf("automatic NewAPI login should hide manual authorize URL while preserving manual fallback")
 	}
 }
 
@@ -105,6 +105,50 @@ func TestFrontendNewAPIOAuthCommunicatesAutomaticCompletion(t *testing.T) {
 	}
 	if !strings.Contains(js, "首次可能需要登录") || !strings.Contains(js, "当前浏览器登录态") {
 		t.Fatalf("NewAPI login should explain persistent automatic mode and current-browser manual mode")
+	}
+}
+
+func TestFrontendNewAPIAutomaticModeIsDefaultAndHidesManualCallbackControls(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	if !strings.Contains(js, `newapiAutoCallback: true`) {
+		t.Fatalf("NewAPI automatic callback mode should be the default")
+	}
+	if !strings.Contains(js, `${!auto && state.oauthAuthorizeUrl ?`) ||
+		!strings.Contains(js, "!auto ? `<input class=\"field\" name=\"callbackUrl\"") {
+		t.Fatalf("manual copy/callback controls should only render when automatic mode is disabled")
+	}
+	if !strings.Contains(js, `EventsOn("oauth:callback"`) ||
+		!strings.Contains(js, "completeNewAPIOAuthFromCallback") {
+		t.Fatalf("frontend should complete captured OAuth callbacks through the normal Wails binding")
+	}
+}
+
+func TestBackendOAuthCallbackWaiterOnlyEmitsFrontendCallbackEvent(t *testing.T) {
+	raw, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goSrc := string(raw)
+
+	start := strings.Index(goSrc, "func (a *App) waitNewAPIOAuthCallback")
+	if start < 0 {
+		t.Fatalf("backend must define waitNewAPIOAuthCallback")
+	}
+	end := strings.Index(goSrc[start:], "func nextOAuthCallback")
+	if end < 0 {
+		t.Fatalf("waitNewAPIOAuthCallback test could not find function boundary")
+	}
+	waiter := goSrc[start : start+end]
+	if !strings.Contains(waiter, "emitOAuthCallbackToFrontend") {
+		t.Fatalf("OAuth callback waiter should emit a frontend event")
+	}
+	if strings.Contains(waiter, "CompleteNewAPIOAuth") {
+		t.Fatalf("OAuth callback waiter must not directly complete login from a background goroutine")
 	}
 }
 

@@ -3,7 +3,7 @@ const state = {
     provider: "krill",
     email: "",
     newapiBaseUrl: "",
-    newapiAutoCallback: false,
+    newapiAutoCallback: true,
     rememberLogin: true,
     refreshSec: 60,
     onTop: true,
@@ -319,9 +319,9 @@ function renderProviderLoginFields(provider) {
     return `
       <input class="field" name="newapiBaseUrl" autocomplete="url" placeholder="NewAPI 网站地址，例如 https://x666.me" value="${escapeHTML(state.config.newapiBaseUrl || "")}" />
       <button class="oauth-button" type="button" data-action="newapi-start-oauth">${state.busy ? "打开中..." : "使用 LinuxDo 登录"}</button>
-      ${state.oauthAuthorizeUrl ? `<button class="oauth-copy" type="button" data-action="copy-oauth-url">复制授权链接</button>` : ""}
+      ${!auto && state.oauthAuthorizeUrl ? `<button class="oauth-copy" type="button" data-action="copy-oauth-url">复制授权链接</button>` : ""}
       <label class="check"><input type="checkbox" name="autoCallback" ${auto ? "checked" : ""} />自动完成登录（独立窗口）</label>
-      <input class="field" name="callbackUrl" autocomplete="off" placeholder="粘贴登录完成后的回调 URL" />
+      ${!auto ? `<input class="field" name="callbackUrl" autocomplete="off" placeholder="粘贴登录完成后的回调 URL" />` : ""}
       <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
       <div class="oauth-note">${escapeHTML(state.oauthMessage || (auto ? "LinuxDo 授权完成后会自动登录；首次可能需要登录，之后会记住。" : "使用当前浏览器登录态打开授权页；完成后请复制地址栏完整回调 URL。"))}</div>
     `;
@@ -341,6 +341,9 @@ function renderProviderLoginFields(provider) {
 
 function renderLoginPrimaryButton(provider) {
   if (provider === "newapi") {
+    if (state.config.newapiAutoCallback) {
+      return "";
+    }
     return `<button class="primary" type="submit">${state.busy ? "验证中..." : "完成登录"}</button>`;
   }
   if (provider === "sub2") {
@@ -548,7 +551,7 @@ async function startNewAPIOAuth(form) {
     });
     state.config.provider = "newapi";
     state.config.newapiBaseUrl = started.baseUrl || baseUrl;
-    state.oauthAuthorizeUrl = started.authorizeUrl || "";
+    state.oauthAuthorizeUrl = started.autoCapture ? "" : (started.authorizeUrl || "");
     state.oauthMessage = started.autoCapture
       ? "已打开独立授权窗口，LinuxDo 授权完成后会自动登录；首次可能需要登录，之后会记住。"
       : "已用当前浏览器打开授权页。完成后请复制 NewAPI 回调页地址栏完整 URL。";
@@ -591,16 +594,11 @@ async function onNewAPIComplete(event) {
   state.formError = "";
   render();
   try {
-    const snap = await backend().CompleteNewAPIOAuth({
+    await completeNewAPIOAuthFromCallback({
       baseUrl,
       callbackUrl,
       rememberLogin,
     });
-    state.snapshot = snap;
-    state.config = { ...state.config, provider: "newapi", newapiBaseUrl: baseUrl, rememberLogin };
-    state.modal = "";
-    state.oauthMessage = "";
-    state.oauthAuthorizeUrl = "";
   } catch (err) {
     state.formError = String(err || "NewAPI 登录失败");
     state.modal = "login";
@@ -608,6 +606,32 @@ async function onNewAPIComplete(event) {
     state.busy = false;
     render();
   }
+}
+
+async function completeNewAPIOAuthFromCallback(payload) {
+  const baseUrl = text(payload?.baseUrl || state.config.newapiBaseUrl).trim();
+  const callbackUrl = text(payload?.callbackUrl).trim();
+  const rememberLogin = typeof payload?.rememberLogin === "boolean" ? payload.rememberLogin : state.config.rememberLogin;
+  if (!baseUrl || !callbackUrl) {
+    state.formError = "NewAPI 回调 URL 无效";
+    state.modal = "login";
+    render();
+    return;
+  }
+  state.busy = true;
+  state.formError = "";
+  state.oauthMessage = "正在完成 NewAPI 登录...";
+  render();
+  const snap = await backend().CompleteNewAPIOAuth({
+    baseUrl,
+    callbackUrl,
+    rememberLogin,
+  });
+  state.snapshot = snap;
+  state.config = { ...state.config, provider: "newapi", newapiBaseUrl: baseUrl, rememberLogin };
+  state.modal = "";
+  state.oauthMessage = "";
+  state.oauthAuthorizeUrl = "";
 }
 
 async function onSettings(event) {
@@ -650,6 +674,17 @@ async function boot() {
       state.formError = String(message || "NewAPI 登录失败");
       state.modal = "login";
       render();
+    });
+    window.runtime.EventsOn("oauth:callback", async (payload) => {
+      try {
+        await completeNewAPIOAuthFromCallback(payload);
+      } catch (err) {
+        state.formError = String(err || "NewAPI 登录失败");
+        state.modal = "login";
+      } finally {
+        state.busy = false;
+        render();
+      }
     });
   }
   const initial = await api.Bootstrap();

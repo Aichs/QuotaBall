@@ -448,17 +448,30 @@ func (a *App) Logout() (SnapshotDTO, error) {
 }
 
 func (a *App) waitNewAPIOAuthCallback(baseURL string, remember bool, capture *oauthCapture) {
+	defer a.recoverOAuthCallbackPanic()
 	callbackURL, ok := nextOAuthCallback(capture.Callbacks, capture.Done, a.stop)
 	if !ok || strings.TrimSpace(callbackURL) == "" {
 		return
 	}
-	_, err := a.CompleteNewAPIOAuth(NewAPIOAuthCompleteRequest{
+	a.emitOAuthCallbackToFrontend(NewAPIOAuthCompleteRequest{
 		BaseURL:       baseURL,
 		CallbackURL:   callbackURL,
 		RememberLogin: remember,
 	})
-	if err != nil {
-		a.emitOAuthError(err.Error())
+}
+
+func (a *App) recoverOAuthCallbackPanic() {
+	if recovered := recover(); recovered != nil {
+		a.emitOAuthError("NewAPI 自动登录异常，请重试")
+	}
+}
+
+func (a *App) emitOAuthCallbackToFrontend(req NewAPIOAuthCompleteRequest) {
+	a.mu.Lock()
+	ctx := a.ctx
+	a.mu.Unlock()
+	if ctx != nil {
+		wailsruntime.EventsEmit(ctx, "oauth:callback", req)
 	}
 }
 
