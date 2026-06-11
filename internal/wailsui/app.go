@@ -338,32 +338,25 @@ func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (NewAPIOAuthStartDTO
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	var capture *oauthCapture
-	var redirectURI string
-	var err error
-	if req.AutoCallback {
-		capture, err = startOAuthCallback(context.Background())
-		if err != nil {
-			return NewAPIOAuthStartDTO{}, err
-		}
-		redirectURI = capture.RedirectURI
-	}
-	start, err := a.newSvc.StartLinuxDo(ctx, baseURL, req.RememberLogin, redirectURI)
+	start, err := a.newSvc.StartLinuxDo(ctx, baseURL, req.RememberLogin)
 	if err != nil {
-		if capture != nil {
-			capture.Close()
-		}
 		return NewAPIOAuthStartDTO{}, err
 	}
 
 	a.mu.Lock()
 	wailsCtx := a.ctx
 	a.mu.Unlock()
+	var capture *oauthCapture
+	if req.AutoCallback {
+		capture, err = startOAuthBrowserCapture(context.Background(), start.AuthorizeURL, start.BaseURL)
+		if err != nil {
+			return NewAPIOAuthStartDTO{}, err
+		}
+	}
 	if capture != nil {
 		a.replaceOAuthCapture(capture)
 		go a.waitNewAPIOAuthCallback(start.BaseURL, req.RememberLogin, capture)
-	}
-	if wailsCtx != nil {
+	} else if wailsCtx != nil {
 		wailsruntime.BrowserOpenURL(wailsCtx, start.AuthorizeURL)
 	}
 	return NewAPIOAuthStartDTO{

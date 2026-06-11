@@ -69,8 +69,12 @@ func TestStartNewAPIOAuthDoesNotPersistProviderBeforeCompletion(t *testing.T) {
 func TestStartNewAPIOAuthStartsAutomaticCallbackWhenRequested(t *testing.T) {
 	callbacks := make(chan string)
 	var started bool
-	restore := stubOAuthCapture(t, callbacks, func() {
+	var gotAuthorizeURL string
+	var gotBaseURL string
+	restore := stubOAuthCapture(t, callbacks, func(authorizeURL, baseURL string) {
 		started = true
+		gotAuthorizeURL = authorizeURL
+		gotBaseURL = baseURL
 	})
 	defer restore()
 
@@ -109,8 +113,14 @@ func TestStartNewAPIOAuthStartsAutomaticCallbackWhenRequested(t *testing.T) {
 	if !start.AutoCapture {
 		t.Fatalf("StartNewAPIOAuth should report automatic capture is active")
 	}
-	if !strings.Contains(start.AuthorizeURL, "redirect_uri=http%3A%2F%2F127.0.0.1%3A27182%2Foauth%2Flinuxdo") {
-		t.Fatalf("authorize URL must include the local callback redirect_uri when automatic callback is requested: %q", start.AuthorizeURL)
+	if strings.Contains(start.AuthorizeURL, "redirect_uri=") {
+		t.Fatalf("automatic capture for arbitrary NewAPI sites must not rewrite redirect_uri: %q", start.AuthorizeURL)
+	}
+	if gotAuthorizeURL != start.AuthorizeURL {
+		t.Fatalf("capture authorize URL = %q, want %q", gotAuthorizeURL, start.AuthorizeURL)
+	}
+	if gotBaseURL != start.BaseURL {
+		t.Fatalf("capture base URL = %q, want %q", gotBaseURL, start.BaseURL)
 	}
 }
 
@@ -139,22 +149,21 @@ func TestSaveSettingsDoesNotActivateSub2Placeholder(t *testing.T) {
 	}
 }
 
-func stubOAuthCapture(t *testing.T, callbacks <-chan string, onStart func()) func() {
+func stubOAuthCapture(t *testing.T, callbacks <-chan string, onStart func(authorizeURL, baseURL string)) func() {
 	t.Helper()
-	old := startOAuthCallback
-	startOAuthCallback = func(ctx context.Context) (*oauthCapture, error) {
+	old := startOAuthBrowserCapture
+	startOAuthBrowserCapture = func(ctx context.Context, authorizeURL, baseURL string) (*oauthCapture, error) {
 		if onStart != nil {
-			onStart()
+			onStart(authorizeURL, baseURL)
 		}
 		return &oauthCapture{
-			RedirectURI: localOAuthRedirectURI,
-			Callbacks:   callbacks,
-			Done:        make(chan struct{}),
-			close:       func() {},
+			Callbacks: callbacks,
+			Done:      make(chan struct{}),
+			close:     func() {},
 		}, nil
 	}
 	return func() {
-		startOAuthCallback = old
+		startOAuthBrowserCapture = old
 	}
 }
 

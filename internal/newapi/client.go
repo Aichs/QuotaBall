@@ -126,7 +126,7 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func LinuxDoAuthorizeURL(clientID, state string, redirectURI ...string) string {
+func LinuxDoAuthorizeURL(clientID, state string) string {
 	u := url.URL{
 		Scheme: "https",
 		Host:   "connect.linux.do",
@@ -136,9 +136,6 @@ func LinuxDoAuthorizeURL(clientID, state string, redirectURI ...string) string {
 	q.Set("response_type", "code")
 	q.Set("client_id", clientID)
 	q.Set("state", state)
-	if len(redirectURI) > 0 && strings.TrimSpace(redirectURI[0]) != "" {
-		q.Set("redirect_uri", strings.TrimSpace(redirectURI[0]))
-	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }
@@ -156,12 +153,7 @@ func ExtractLinuxDoCallback(baseURL, callbackURL string) (OAuthCallback, error) 
 	if err != nil || cb.Scheme == "" || cb.Host == "" {
 		return OAuthCallback{}, errors.New("回调 URL 无效")
 	}
-	if cb.Path != "/oauth/linuxdo" {
-		return OAuthCallback{}, errors.New("回调 URL 与 NewAPI 网站不匹配")
-	}
-	hostMatchesBase := strings.EqualFold(cb.Host, baseParsed.Host)
-	hostIsLocalCallback := cb.Scheme == "http" && isLoopbackHost(cb.Hostname())
-	if !hostMatchesBase && !hostIsLocalCallback {
+	if !strings.EqualFold(cb.Host, baseParsed.Host) || cb.Path != "/oauth/linuxdo" {
 		return OAuthCallback{}, errors.New("回调 URL 与 NewAPI 网站不匹配")
 	}
 	code := strings.TrimSpace(cb.Query().Get("code"))
