@@ -149,6 +149,32 @@ CommandLine="C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-deb
 	}
 }
 
+func TestRecoverOAuthPanicDoesNotPropagate(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("recoverOAuthPanic should recover panic, got %v", recovered)
+		}
+	}()
+	func() {
+		defer recoverOAuthPanic("test")
+		panic("boom")
+	}()
+}
+
+func TestSanitizeOAuthLogMessageRedactsSensitiveQueryValues(t *testing.T) {
+	got := sanitizeOAuthLogMessage("https://connect.linux.do/oauth2/authorize?client_id=client-123&state=state-456&code=code-789")
+	for _, secret := range []string{"client-123", "state-456", "code-789"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("log message leaked %q in %q", secret, got)
+		}
+	}
+	for _, marker := range []string{"client_id=<redacted>", "state=<redacted>", "code=<redacted>"} {
+		if !strings.Contains(got, marker) {
+			t.Fatalf("log message missing redaction marker %q in %q", marker, got)
+		}
+	}
+}
+
 func TestOAuthBrowserProfileDirIsPersistent(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("QUOTABALL_OAUTH_PROFILE_DIR", root)

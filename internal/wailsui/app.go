@@ -321,7 +321,14 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 	return snapshotDTO(snap), nil
 }
 
-func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (NewAPIOAuthStartDTO, error) {
+func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (dto NewAPIOAuthStartDTO, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			oauthLogf("StartNewAPIOAuth panic: %v", recovered)
+			dto = NewAPIOAuthStartDTO{}
+			err = errors.New("NewAPI 登录启动异常，请重试")
+		}
+	}()
 	baseURL := strings.TrimSpace(req.BaseURL)
 	if baseURL == "" {
 		return NewAPIOAuthStartDTO{}, errors.New("请输入 NewAPI 网站地址")
@@ -366,7 +373,14 @@ func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (NewAPIOAuthStartDTO
 	}, nil
 }
 
-func (a *App) CompleteNewAPIOAuth(req NewAPIOAuthCompleteRequest) (SnapshotDTO, error) {
+func (a *App) CompleteNewAPIOAuth(req NewAPIOAuthCompleteRequest) (dto SnapshotDTO, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			oauthLogf("CompleteNewAPIOAuth panic: %v", recovered)
+			dto = SnapshotDTO{}
+			err = errors.New("NewAPI 登录完成异常，请重试")
+		}
+	}()
 	baseURL, err := newapi.NormalizeBaseURL(req.BaseURL)
 	if err != nil {
 		return SnapshotDTO{}, err

@@ -27,9 +27,11 @@ var startOAuthBrowserCapture = startDefaultOAuthBrowserCapture
 
 const oauthProfileDirEnv = "QUOTABALL_OAUTH_PROFILE_DIR"
 const oauthDebugPortEnv = "QUOTABALL_OAUTH_DEBUG_PORT"
+const oauthLogFileEnv = "QUOTABALL_OAUTH_LOG_FILE"
 const defaultOAuthDebugPort = 27183
 
 var debugPortPattern = regexp.MustCompile(`--remote-debugging-port=(\d+)`)
+var oauthSensitiveQueryPattern = regexp.MustCompile(`(?i)(code|state|client_id)=([^&\s]+)`)
 
 type oauthCapture struct {
 	Callbacks <-chan string
@@ -49,7 +51,14 @@ type devToolsTab struct {
 	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 }
 
-func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL string) (*oauthCapture, error) {
+func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL string) (capture *oauthCapture, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			oauthLogf("oauth browser start panic: %v", recovered)
+			capture = nil
+			err = errors.New("自动登录浏览器启动异常，请重试")
+		}
+	}()
 	browser, err := findOAuthBrowser()
 	if err != nil {
 		return nil, err
@@ -94,15 +103,50 @@ func startDefaultOAuthBrowserCapture(ctx context.Context, authorizeURL, baseURL 
 		})
 	}
 	go func() {
+		defer recoverOAuthPanic("oauth browser wait")
 		_ = cmd.Wait()
 	}()
-	go pollOAuthBrowser(ctx, port, baseURL, callbacks, done, stop)
+	go func() {
+		defer recoverOAuthPanic("oauth browser poll")
+		pollOAuthBrowser(ctx, port, baseURL, callbacks, done, stop)
+	}()
 
 	return &oauthCapture{
 		Callbacks: callbacks,
 		Done:      done,
 		close:     stop,
 	}, nil
+}
+
+func recoverOAuthPanic(scope string) {
+	if recovered := recover(); recovered != nil {
+		oauthLogf("%s panic: %v", scope, recovered)
+	}
+}
+
+func oauthLogf(format string, args ...any) {
+	message := sanitizeOAuthLogMessage(fmt.Sprintf(format, args...))
+	path := strings.TrimSpace(os.Getenv(oauthLogFileEnv))
+	if path == "" {
+		root, err := os.UserCacheDir()
+		if err != nil || strings.TrimSpace(root) == "" {
+			root = os.TempDir()
+		}
+		path = filepath.Join(root, "QuotaBall", "oauth.log")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = fmt.Fprintf(file, "%s %s\n", time.Now().Format(time.RFC3339), message)
+}
+
+func sanitizeOAuthLogMessage(message string) string {
+	return oauthSensitiveQueryPattern.ReplaceAllString(message, `$1=<redacted>`)
 }
 
 func oauthBrowserDebugPort() (int, error) {
@@ -198,6 +242,7 @@ func normalizeCommandLine(value string) string {
 }
 
 func pollOAuthBrowser(ctx context.Context, port int, baseURL string, callbacks chan<- string, done <-chan struct{}, stop func()) {
+	defer recoverOAuthPanic("oauth poll")
 	client := &http.Client{Timeout: 2 * time.Second}
 	watcherCtx, cancelWatchers := context.WithCancel(ctx)
 	defer cancelWatchers()
@@ -226,7 +271,10 @@ func pollOAuthBrowser(ctx context.Context, port int, baseURL string, callbacks c
 						continue
 					}
 					watchedTabs[tab.ID] = struct{}{}
-					go watchOAuthDevToolsTab(watcherCtx, tab.WebSocketDebuggerURL, baseURL, callbacks, done, stop)
+					go func(websocketURL string) {
+						defer recoverOAuthPanic("oauth devtools watcher")
+						watchOAuthDevToolsTab(watcherCtx, websocketURL, baseURL, callbacks, done, stop)
+					}(tab.WebSocketDebuggerURL)
 				}
 				continue
 			}
@@ -237,6 +285,7 @@ func pollOAuthBrowser(ctx context.Context, port int, baseURL string, callbacks c
 }
 
 func watchOAuthDevToolsTab(ctx context.Context, websocketURL, baseURL string, callbacks chan<- string, done <-chan struct{}, stop func()) {
+	defer recoverOAuthPanic("oauth devtools")
 	dialer := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, websocketURL, nil)
 	if err != nil {
