@@ -34,9 +34,12 @@ type NewAPIOAuthStartDTO struct {
 }
 
 type NewAPIOAuthCompleteRequest struct {
-	BaseURL       string `json:"baseUrl"`
-	CallbackURL   string `json:"callbackUrl"`
-	RememberLogin bool   `json:"rememberLogin"`
+	BaseURL        string `json:"baseUrl"`
+	CallbackURL    string `json:"callbackUrl"`
+	SessionCookies string `json:"sessionCookies,omitempty"`
+	AccessToken    string `json:"accessToken,omitempty"`
+	UserID         string `json:"userId,omitempty"`
+	RememberLogin  bool   `json:"rememberLogin"`
 }
 
 type SettingsRequest struct {

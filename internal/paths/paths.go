@@ -14,6 +14,9 @@ type Paths struct {
 
 func Resolve() Paths {
 	base := executableDir()
+	if override := os.Getenv("QUOTABALL_BASE_DIR"); override != "" {
+		base = filepath.Clean(override)
+	}
 	return Paths{
 		Base:      base,
 		Config:    filepath.Join(base, "config.json"),

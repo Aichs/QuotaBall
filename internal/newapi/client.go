@@ -29,6 +29,7 @@ var ErrAuthRequired = errors.New("请登录 NewAPI")
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
+	UserID     string
 }
 
 type Status struct {
@@ -302,6 +303,9 @@ func (c *Client) do(ctx context.Context, method, path, token string, body any, o
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if userID := strings.TrimSpace(c.UserID); userID != "" {
+		req.Header.Set("New-Api-User", userID)
 	}
 
 	httpClient := c.HTTPClient

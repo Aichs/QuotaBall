@@ -130,7 +130,32 @@ func TestFrontendNewAPIAutomaticModeIsDefaultAndHidesManualCallbackControls(t *t
 	}
 }
 
-func TestBackendOAuthCallbackWaiterOnlyEmitsFrontendCallbackEvent(t *testing.T) {
+func TestFrontendNewAPIOAuthForwardsCapturedCallbackAndOptionalCookies(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	start := strings.Index(js, "async function completeNewAPIOAuthFromCallback")
+	if start < 0 {
+		t.Fatalf("frontend must define completeNewAPIOAuthFromCallback")
+	}
+	end := strings.Index(js[start:], "async function onSettings")
+	if end < 0 {
+		t.Fatalf("completeNewAPIOAuthFromCallback test could not find function boundary")
+	}
+	complete := js[start : start+end]
+	if !strings.Contains(complete, "sessionCookies") || !strings.Contains(complete, "accessToken") || !strings.Contains(complete, "userId") {
+		t.Fatalf("automatic NewAPI completion must forward browser cookies, access token, and user id to the backend")
+	}
+	if strings.Contains(complete, `if (!baseUrl || !callbackUrl)`) ||
+		strings.Contains(complete, `!callbackUrl && !sessionCookies)`) {
+		t.Fatalf("automatic NewAPI completion must allow callback, session-cookie, and token completion")
+	}
+}
+
+func TestBackendOAuthCallbackWaiterCompletesCapturedLoginInBackend(t *testing.T) {
 	raw, err := os.ReadFile("app.go")
 	if err != nil {
 		t.Fatal(err)
@@ -146,11 +171,14 @@ func TestBackendOAuthCallbackWaiterOnlyEmitsFrontendCallbackEvent(t *testing.T) 
 		t.Fatalf("waitNewAPIOAuthCallback test could not find function boundary")
 	}
 	waiter := goSrc[start : start+end]
-	if !strings.Contains(waiter, "emitOAuthCallbackToFrontend") {
-		t.Fatalf("OAuth callback waiter should emit a frontend event")
+	if !strings.Contains(waiter, "completeCapturedNewAPIOAuth") {
+		t.Fatalf("OAuth callback waiter should complete captured browser login in the backend")
 	}
-	if strings.Contains(waiter, "CompleteNewAPIOAuth") {
-		t.Fatalf("OAuth callback waiter must not directly complete login from a background goroutine")
+	if strings.Contains(waiter, "NewAPI 自动登录未捕获到 session") {
+		t.Fatalf("automatic OAuth waiter must allow callback-only completion for backend-owned OAuth state")
+	}
+	if !strings.Contains(waiter, "emitOAuthError") {
+		t.Fatalf("automatic OAuth waiter must still emit errors when capture closes without callback")
 	}
 }
 
@@ -166,6 +194,44 @@ func TestFrontendSnapshotUpdateKeepsLoginModalInSyncWithAuthState(t *testing.T) 
 	}
 	if !strings.Contains(js, `if (!snap.loggedIn)`) || !strings.Contains(js, `state.modal = "login";`) {
 		t.Fatalf("snapshot update must force the login modal when the user is logged out")
+	}
+}
+
+func TestFrontendNewAPIOAuthErrorAndTimeoutResetWaitingState(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	for _, want := range []string{
+		"scheduleOAuthWaitTimeout",
+		"clearOAuthWaitTimer",
+		"NewAPI 自动登录超时",
+		`state.busy = false;`,
+		`state.oauthMessage = "";`,
+		`state.formError = "";`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("NewAPI OAuth waiting/error state must include %q", want)
+		}
+	}
+}
+
+func TestFrontendAuthRequiredRefreshForcesLoggedOutLoginModal(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	if !strings.Contains(js, "isAuthRequiredMessage") ||
+		!strings.Contains(js, `loggedIn: false`) ||
+		!strings.Contains(js, `state.modal = "login";`) {
+		t.Fatalf("refresh auth failures must force a logged-out login state")
+	}
+	if !strings.Contains(js, "loggedOutSnapshotError") {
+		t.Fatalf("logged-out login view should surface backend auth errors")
 	}
 }
 

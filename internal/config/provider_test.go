@@ -19,7 +19,8 @@ func TestDefaultProviderIsKrill(t *testing.T) {
 func TestLoadNormalizesUnknownProviderToKrill(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{"provider":"unknown","newapi_base_url":"https://x666.me/"}`), 0o600); err != nil {
+	baseURL := testNewAPIBaseURL()
+	if err := os.WriteFile(path, []byte(`{"provider":"unknown","newapi_base_url":"`+baseURL+`/"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -31,7 +32,7 @@ func TestLoadNormalizesUnknownProviderToKrill(t *testing.T) {
 	if cfg.Provider != ProviderKrill {
 		t.Fatalf("Provider = %q, want %q", cfg.Provider, ProviderKrill)
 	}
-	if cfg.NewAPIBaseURL != "https://x666.me" {
+	if cfg.NewAPIBaseURL != baseURL {
 		t.Fatalf("NewAPIBaseURL = %q, want normalized base URL", cfg.NewAPIBaseURL)
 	}
 }
@@ -57,7 +58,7 @@ func TestSaveNewAPIConfigDoesNotPersistSensitiveTokenFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := Default()
 	cfg.Provider = ProviderNewAPI
-	cfg.NewAPIBaseURL = "https://x666.me/"
+	cfg.NewAPIBaseURL = testNewAPIBaseURL() + "/"
 	cfg.Password = "test-secret-password"
 
 	if err := Save(path, cfg); err != nil {
@@ -76,4 +77,8 @@ func TestSaveNewAPIConfigDoesNotPersistSensitiveTokenFields(t *testing.T) {
 	if bytes.Contains(raw, []byte(`"password": "test-secret-password"`)) {
 		t.Fatalf("config must not contain plaintext password: %s", raw)
 	}
+}
+
+func testNewAPIBaseURL() string {
+	return "https://newapi.example.test"
 }

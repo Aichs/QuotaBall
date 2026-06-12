@@ -26,6 +26,7 @@ const state = {
   formError: "",
   oauthMessage: "",
   oauthAuthorizeUrl: "",
+  oauthWaitTimer: null,
 };
 
 const app = document.querySelector("#app");
@@ -254,8 +255,8 @@ function renderModal() {
 }
 
 function renderLogin(asModal = true) {
-  const err = state.formError || "";
   const provider = state.config.provider || "krill";
+  const err = state.formError || loggedOutSnapshotError(provider);
   const formName = provider === "newapi" ? "newapi-complete" : "login";
   const title = provider === "newapi" ? "登录 NewAPI" : provider === "sub2" ? "登录 Sub2" : "登录 Krill AI";
   const body = `
@@ -293,6 +294,23 @@ function renderLogin(asModal = true) {
   `;
 }
 
+function loggedOutSnapshotError(provider) {
+  if (state.snapshot?.loggedIn) {
+    return "";
+  }
+  const err = text(state.snapshot?.err).trim();
+  if (!err || err === "正在检查登录状态...") {
+    return "";
+  }
+  if (provider === "newapi" && err === "请登录 Krill AI") {
+    return "";
+  }
+  if (provider === "krill" && err === "请登录 NewAPI") {
+    return "";
+  }
+  return err;
+}
+
 function renderProviderTabs(provider) {
   const providers = [
     ["newapi", "NewAPI"],
@@ -317,7 +335,7 @@ function renderProviderLoginFields(provider) {
   if (provider === "newapi") {
     const auto = Boolean(state.config.newapiAutoCallback);
     return `
-      <input class="field" name="newapiBaseUrl" autocomplete="url" placeholder="NewAPI 网站地址，例如 https://x666.me" value="${escapeHTML(state.config.newapiBaseUrl || "")}" />
+      <input class="field" name="newapiBaseUrl" autocomplete="url" placeholder="NewAPI 网站地址，例如 https://newapi.example.com" value="${escapeHTML(state.config.newapiBaseUrl || "")}" />
       <button class="oauth-button" type="button" data-action="newapi-start-oauth">${state.busy ? "打开中..." : "使用 LinuxDo 登录"}</button>
       ${!auto && state.oauthAuthorizeUrl ? `<button class="oauth-copy" type="button" data-action="copy-oauth-url">复制授权链接</button>` : ""}
       <label class="check"><input type="checkbox" name="autoCallback" ${auto ? "checked" : ""} />自动完成登录（独立窗口）</label>
@@ -470,11 +488,21 @@ async function callRefresh() {
       state.modal = "login";
     }
   } catch (err) {
-    state.snapshot = { ...state.snapshot, err: String(err || "刷新失败") };
+    const message = String(err || "刷新失败");
+    if (isAuthRequiredMessage(message)) {
+      state.snapshot = { ...state.snapshot, err: message, ok: false, loggedIn: false };
+      state.modal = "login";
+    } else {
+      state.snapshot = { ...state.snapshot, err: message };
+    }
   } finally {
     state.busy = false;
     render();
   }
+}
+
+function isAuthRequiredMessage(message) {
+  return /请登录|auth required|unauthorized|token not provided/i.test(String(message || ""));
 }
 
 async function onLogin(event) {
@@ -555,11 +583,39 @@ async function startNewAPIOAuth(form) {
     state.oauthMessage = started.autoCapture
       ? "已打开独立授权窗口，LinuxDo 授权完成后会自动登录；首次可能需要登录，之后会记住。"
       : "已用当前浏览器打开授权页。完成后请复制 NewAPI 回调页地址栏完整 URL。";
+    if (started.autoCapture) {
+      scheduleOAuthWaitTimeout();
+    } else {
+      clearOAuthWaitTimer();
+    }
   } catch (err) {
+    clearOAuthWaitTimer();
     state.formError = String(err || "启动 LinuxDo 登录失败");
   } finally {
     state.busy = false;
     render();
+  }
+}
+
+function scheduleOAuthWaitTimeout() {
+  clearOAuthWaitTimer();
+  state.oauthWaitTimer = window.setTimeout(() => {
+    state.oauthWaitTimer = null;
+    if (state.snapshot.loggedIn || (state.config.provider || "") !== "newapi") {
+      return;
+    }
+    state.busy = false;
+    state.formError = "NewAPI 自动登录超时，请确认授权窗口已完成跳转后重试。";
+    state.oauthMessage = "";
+    state.modal = "login";
+    render();
+  }, 120000);
+}
+
+function clearOAuthWaitTimer() {
+  if (state.oauthWaitTimer) {
+    window.clearTimeout(state.oauthWaitTimer);
+    state.oauthWaitTimer = null;
   }
 }
 
@@ -611,8 +667,11 @@ async function onNewAPIComplete(event) {
 async function completeNewAPIOAuthFromCallback(payload) {
   const baseUrl = text(payload?.baseUrl || state.config.newapiBaseUrl).trim();
   const callbackUrl = text(payload?.callbackUrl).trim();
+  const sessionCookies = text(payload?.sessionCookies).trim();
+  const accessToken = text(payload?.accessToken).trim();
+  const userId = text(payload?.userId).trim();
   const rememberLogin = typeof payload?.rememberLogin === "boolean" ? payload.rememberLogin : state.config.rememberLogin;
-  if (!baseUrl || !callbackUrl) {
+  if (!baseUrl || (!callbackUrl && !sessionCookies && !accessToken)) {
     state.formError = "NewAPI 回调 URL 无效";
     state.modal = "login";
     render();
@@ -625,13 +684,22 @@ async function completeNewAPIOAuthFromCallback(payload) {
   const snap = await backend().CompleteNewAPIOAuth({
     baseUrl,
     callbackUrl,
+    sessionCookies,
+    accessToken,
+    userId,
     rememberLogin,
   });
   state.snapshot = snap;
+  if (!snap.loggedIn) {
+    state.formError = snap.err || "NewAPI 登录失败";
+    state.modal = "login";
+    return;
+  }
   state.config = { ...state.config, provider: "newapi", newapiBaseUrl: baseUrl, rememberLogin };
   state.modal = "";
   state.oauthMessage = "";
   state.oauthAuthorizeUrl = "";
+  clearOAuthWaitTimer();
 }
 
 async function onSettings(event) {
@@ -663,6 +731,10 @@ async function boot() {
     window.runtime.EventsOn("snapshot:update", (snap) => {
       state.snapshot = snap;
       if (snap.loggedIn && state.modal === "login") {
+        clearOAuthWaitTimer();
+        state.busy = false;
+        state.oauthMessage = "";
+        state.formError = "";
         state.modal = "";
       }
       if (!snap.loggedIn) {
@@ -671,12 +743,16 @@ async function boot() {
       render();
     });
     window.runtime.EventsOn("oauth:error", (message) => {
+      clearOAuthWaitTimer();
+      state.busy = false;
       state.formError = String(message || "NewAPI 登录失败");
+      state.oauthMessage = "";
       state.modal = "login";
       render();
     });
     window.runtime.EventsOn("oauth:callback", async (payload) => {
       try {
+        clearOAuthWaitTimer();
         await completeNewAPIOAuthFromCallback(payload);
       } catch (err) {
         state.formError = String(err || "NewAPI 登录失败");

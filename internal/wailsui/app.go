@@ -351,7 +351,12 @@ func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (dto NewAPIOAuthStar
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	start, err := a.newSvc.StartLinuxDo(ctx, baseURL, req.RememberLogin)
+	var start newapi.OAuthStart
+	if req.AutoCallback {
+		start, err = a.newSvc.StartLinuxDoBrowser(ctx, baseURL, req.RememberLogin)
+	} else {
+		start, err = a.newSvc.StartLinuxDo(ctx, baseURL, req.RememberLogin)
+	}
 	if err != nil {
 		return NewAPIOAuthStartDTO{}, err
 	}
@@ -361,7 +366,7 @@ func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (dto NewAPIOAuthStar
 	a.mu.Unlock()
 	var capture *oauthCapture
 	if req.AutoCallback {
-		capture, err = startOAuthBrowserCapture(context.Background(), start.AuthorizeURL, start.BaseURL)
+		capture, err = startOAuthBrowserCapture(context.Background(), start.AuthorizeURL, start.BaseURL, start.LinuxDoClientID)
 		if err != nil {
 			return NewAPIOAuthStartDTO{}, err
 		}
@@ -387,12 +392,21 @@ func (a *App) CompleteNewAPIOAuth(req NewAPIOAuthCompleteRequest) (dto SnapshotD
 			err = errors.New("NewAPI 登录完成异常，请重试")
 		}
 	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return a.completeNewAPIOAuth(ctx, req)
+}
+
+func (a *App) completeNewAPIOAuth(ctx context.Context, req NewAPIOAuthCompleteRequest) (SnapshotDTO, error) {
 	baseURL, err := newapi.NormalizeBaseURL(req.BaseURL)
 	if err != nil {
 		return SnapshotDTO{}, err
 	}
 	callbackURL := strings.TrimSpace(req.CallbackURL)
-	if callbackURL == "" {
+	sessionCookies := strings.TrimSpace(req.SessionCookies)
+	accessToken := strings.TrimSpace(req.AccessToken)
+	userID := strings.TrimSpace(req.UserID)
+	if callbackURL == "" && sessionCookies == "" && accessToken == "" {
 		return SnapshotDTO{}, errors.New("请粘贴登录完成后的回调 URL")
 	}
 
@@ -406,9 +420,20 @@ func (a *App) CompleteNewAPIOAuth(req NewAPIOAuthCompleteRequest) (dto SnapshotD
 	a.mu.Unlock()
 	defer a.setRefreshing(false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	snap, err := a.newSvc.CompleteLinuxDo(ctx, baseURL, callbackURL, req.RememberLogin)
+	var snap krill.Snapshot
+	if accessToken != "" {
+		snap, err = a.newSvc.CompleteBrowserToken(ctx, baseURL, accessToken, userID, req.RememberLogin)
+	} else if callbackURL != "" && sessionCookies != "" {
+		snap, err = a.newSvc.CompleteLinuxDoWithCookies(ctx, baseURL, callbackURL, sessionCookies, req.RememberLogin)
+		if err != nil {
+			oauthLogf("browser callback completion failed, falling back to session cookies: %v", err)
+			snap, err = a.newSvc.CompleteBrowserSession(ctx, baseURL, sessionCookies, userID, req.RememberLogin)
+		}
+	} else if sessionCookies != "" {
+		snap, err = a.newSvc.CompleteBrowserSession(ctx, baseURL, sessionCookies, userID, req.RememberLogin)
+	} else {
+		snap, err = a.newSvc.CompleteLinuxDo(ctx, baseURL, callbackURL, req.RememberLogin)
+	}
 	if err != nil {
 		return SnapshotDTO{}, err
 	}
@@ -435,6 +460,18 @@ func (a *App) CompleteNewAPIOAuth(req NewAPIOAuthCompleteRequest) (dto SnapshotD
 	}
 	a.applySnapshot(snap, true)
 	return snapshotDTO(snap), nil
+}
+
+func (a *App) completeCapturedNewAPIOAuth(req NewAPIOAuthCompleteRequest) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	snap, err := a.completeNewAPIOAuth(ctx, req)
+	if err != nil {
+		oauthLogf("oauth backend completion failed: %v", err)
+		a.emitOAuthError(err.Error())
+		return
+	}
+	oauthLogf("oauth backend completion succeeded loggedIn=%t", snap.LoggedIn)
 }
 
 func (a *App) Logout() (SnapshotDTO, error) {
@@ -470,15 +507,35 @@ func (a *App) Logout() (SnapshotDTO, error) {
 
 func (a *App) waitNewAPIOAuthCallback(baseURL string, remember bool, capture *oauthCapture) {
 	defer a.recoverOAuthCallbackPanic()
-	callbackURL, ok := nextOAuthCallback(capture.Callbacks, capture.Done, a.stop)
-	if !ok || strings.TrimSpace(callbackURL) == "" {
+	callback, ok := nextOAuthCallback(capture.Callbacks, capture.Done, a.stop)
+	if !ok {
+		a.emitOAuthError("NewAPI 自动登录窗口已关闭或连接中断，请重新打开 LinuxDo 登录页")
 		return
 	}
-	a.emitOAuthCallbackToFrontend(NewAPIOAuthCompleteRequest{
-		BaseURL:       baseURL,
-		CallbackURL:   callbackURL,
-		RememberLogin: remember,
-	})
+	if !oauthCallbackHasCredential(callback) {
+		message := strings.TrimSpace(callback.Error)
+		if message == "" {
+			message = "NewAPI 自动登录窗口已关闭或连接中断，请重新打开 LinuxDo 登录页"
+		}
+		a.emitOAuthError(message)
+		return
+	}
+	req := NewAPIOAuthCompleteRequest{
+		BaseURL:        baseURL,
+		CallbackURL:    callback.CallbackURL,
+		SessionCookies: callback.SessionCookies,
+		AccessToken:    callback.AccessToken,
+		UserID:         callback.UserID,
+		RememberLogin:  remember,
+	}
+	oauthLogf(
+		"oauth callback captured callback=%t session=%t token=%t user=%t",
+		strings.TrimSpace(req.CallbackURL) != "",
+		strings.TrimSpace(req.SessionCookies) != "",
+		strings.TrimSpace(req.AccessToken) != "",
+		strings.TrimSpace(req.UserID) != "",
+	)
+	a.completeCapturedNewAPIOAuth(req)
 }
 
 func (a *App) recoverOAuthCallbackPanic() {
@@ -496,7 +553,7 @@ func (a *App) emitOAuthCallbackToFrontend(req NewAPIOAuthCompleteRequest) {
 	}
 }
 
-func nextOAuthCallback(callbacks <-chan string, done <-chan struct{}, appStop <-chan struct{}) (string, bool) {
+func nextOAuthCallback(callbacks <-chan oauthCallbackResult, done <-chan struct{}, appStop <-chan struct{}) (oauthCallbackResult, bool) {
 	select {
 	case callbackURL, ok := <-callbacks:
 		return callbackURL, ok
@@ -505,10 +562,10 @@ func nextOAuthCallback(callbacks <-chan string, done <-chan struct{}, appStop <-
 		case callbackURL, ok := <-callbacks:
 			return callbackURL, ok
 		default:
-			return "", false
+			return oauthCallbackResult{}, false
 		}
 	case <-appStop:
-		return "", false
+		return oauthCallbackResult{}, false
 	}
 }
 

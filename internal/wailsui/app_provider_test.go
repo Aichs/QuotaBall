@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"krill_monitor/internal/config"
@@ -18,6 +17,7 @@ import (
 func TestStartNewAPIOAuthDoesNotPersistProviderBeforeCompletion(t *testing.T) {
 	restore := stubOAuthCapture(t, nil, nil)
 	defer restore()
+	_, stateValue := testOAuthCodeState(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -28,7 +28,7 @@ func TestStartNewAPIOAuthDoesNotPersistProviderBeforeCompletion(t *testing.T) {
 				"linuxdo_client_id": "linuxdo-client-id",
 			})
 		case "/api/oauth/state":
-			writeWailsAPITestResponse(t, w, "state-123")
+			writeWailsAPITestResponse(t, w, stateValue)
 		default:
 			http.NotFound(w, r)
 		}
@@ -66,15 +66,21 @@ func TestStartNewAPIOAuthDoesNotPersistProviderBeforeCompletion(t *testing.T) {
 	}
 }
 
-func TestStartNewAPIOAuthStartsAutomaticCallbackWhenRequested(t *testing.T) {
-	callbacks := make(chan string)
+func TestStartNewAPIOAuthStartsAutomaticCallbackWithBrowserSessionStrategy(t *testing.T) {
+	callbacks := make(chan oauthCallbackResult)
 	var started bool
 	var gotAuthorizeURL string
 	var gotBaseURL string
+	var gotClientID string
+	var sawState bool
+	var sawLogout bool
+	_, stateValue := testOAuthCodeState(t)
 	restore := stubOAuthCapture(t, callbacks, func(authorizeURL, baseURL string) {
 		started = true
 		gotAuthorizeURL = authorizeURL
 		gotBaseURL = baseURL
+	}, func(clientID string) {
+		gotClientID = clientID
 	})
 	defer restore()
 
@@ -86,8 +92,12 @@ func TestStartNewAPIOAuthStartsAutomaticCallbackWhenRequested(t *testing.T) {
 				"linuxdo_oauth":     true,
 				"linuxdo_client_id": "linuxdo-client-id",
 			})
+		case "/api/user/logout":
+			sawLogout = true
+			writeWailsAPITestResponse(t, w, nil)
 		case "/api/oauth/state":
-			writeWailsAPITestResponse(t, w, "state-123")
+			sawState = true
+			writeWailsAPITestResponse(t, w, stateValue)
 		default:
 			http.NotFound(w, r)
 		}
@@ -113,8 +123,11 @@ func TestStartNewAPIOAuthStartsAutomaticCallbackWhenRequested(t *testing.T) {
 	if !start.AutoCapture {
 		t.Fatalf("StartNewAPIOAuth should report automatic capture is active")
 	}
-	if strings.Contains(start.AuthorizeURL, "redirect_uri=") {
-		t.Fatalf("automatic capture for arbitrary NewAPI sites must not rewrite redirect_uri: %q", start.AuthorizeURL)
+	if sawState || sawLogout {
+		t.Fatalf("automatic NewAPI login should let the browser own OAuth state, sawState=%v sawLogout=%v", sawState, sawLogout)
+	}
+	if start.AuthorizeURL != "" {
+		t.Fatalf("browser-session automatic capture should not expose an app-owned authorize URL: %q", start.AuthorizeURL)
 	}
 	if gotAuthorizeURL != start.AuthorizeURL {
 		t.Fatalf("capture authorize URL = %q, want %q", gotAuthorizeURL, start.AuthorizeURL)
@@ -122,6 +135,10 @@ func TestStartNewAPIOAuthStartsAutomaticCallbackWhenRequested(t *testing.T) {
 	if gotBaseURL != start.BaseURL {
 		t.Fatalf("capture base URL = %q, want %q", gotBaseURL, start.BaseURL)
 	}
+	if gotClientID != "linuxdo-client-id" {
+		t.Fatalf("capture client ID = %q, want browser-session client id", gotClientID)
+	}
+	_ = stateValue
 }
 
 func TestSaveSettingsDoesNotActivateSub2Placeholder(t *testing.T) {
@@ -150,27 +167,106 @@ func TestSaveSettingsDoesNotActivateSub2Placeholder(t *testing.T) {
 }
 
 func TestNextOAuthCallbackPrefersBufferedCallbackWhenBrowserDone(t *testing.T) {
-	callbacks := make(chan string, 1)
-	callbacks <- "https://x666.me/oauth/linuxdo?code=code-123&state=state-123"
+	baseURL := testHTTPBaseURL(t)
+	code, state := testOAuthCodeState(t)
+	callbackURL := testOAuthCallbackURL(t, baseURL, "/oauth/linuxdo", code, state)
+	callbacks := make(chan oauthCallbackResult, 1)
+	callbacks <- oauthCallbackResult{CallbackURL: callbackURL}
 	done := make(chan struct{})
 	close(done)
 	appStop := make(chan struct{})
 
-	callbackURL, ok := nextOAuthCallback(callbacks, done, appStop)
+	callback, ok := nextOAuthCallback(callbacks, done, appStop)
 	if !ok {
 		t.Fatal("expected buffered callback to win over closed browser done channel")
 	}
-	if callbackURL != "https://x666.me/oauth/linuxdo?code=code-123&state=state-123" {
-		t.Fatalf("callbackURL = %q", callbackURL)
+	if callback.CallbackURL != callbackURL {
+		t.Fatalf("callbackURL = %q", callback.CallbackURL)
 	}
 }
 
-func stubOAuthCapture(t *testing.T, callbacks <-chan string, onStart func(authorizeURL, baseURL string)) func() {
+func TestWaitNewAPIOAuthCallbackCompletesBrowserSessionInBackend(t *testing.T) {
+	var sawUserSelf bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/status":
+			writeWailsAPITestResponse(t, w, map[string]any{
+				"system_name":        "Test NewAPI",
+				"linuxdo_oauth":      true,
+				"linuxdo_client_id":  "linuxdo-client-id",
+				"quota_per_unit":     500000,
+				"quota_display_type": "USD",
+			})
+		case "/api/user/self":
+			sawUserSelf = true
+			if r.Header.Get("New-Api-User") != "42" {
+				t.Fatalf("New-Api-User = %q, want 42", r.Header.Get("New-Api-User"))
+			}
+			cookie, err := r.Cookie("session")
+			if err != nil || cookie.Value != "browser-session" {
+				t.Fatalf("user/self did not receive captured browser session")
+			}
+			writeWailsAPITestResponse(t, w, map[string]any{
+				"id":         42,
+				"username":   "linuxdo_user",
+				"quota":      900000,
+				"used_quota": 100000,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		paths: paths.Paths{Config: configPath},
+		cfg:   cfg,
+		svc:   &krill.Service{},
+		stop:  make(chan struct{}),
+	}
+	app.newSvc = &newapi.Service{Config: &app.cfg}
+	app.newSvc.Configure(app.cfg)
+
+	callbacks := make(chan oauthCallbackResult, 1)
+	callbacks <- oauthCallbackResult{
+		SessionCookies: `[{"name":"session","value":"browser-session"}]`,
+		UserID:         "42",
+	}
+	app.waitNewAPIOAuthCallback(server.URL, true, &oauthCapture{
+		Callbacks: callbacks,
+		Done:      make(chan struct{}),
+		close:     func() {},
+	})
+
+	if !sawUserSelf {
+		t.Fatal("captured browser session was not completed in backend")
+	}
+	if !app.snap.LoggedIn || app.cfg.Provider != config.ProviderNewAPI || app.cfg.NewAPIBaseURL != server.URL {
+		t.Fatalf("app state not updated after captured login: provider=%q base=%q snap=%#v", app.cfg.Provider, app.cfg.NewAPIBaseURL, app.snap)
+	}
+	saved, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Provider != config.ProviderNewAPI || saved.NewAPIBaseURL != server.URL {
+		t.Fatalf("captured login did not persist NewAPI config: provider=%q base=%q", saved.Provider, saved.NewAPIBaseURL)
+	}
+}
+
+func stubOAuthCapture(t *testing.T, callbacks <-chan oauthCallbackResult, onStart func(authorizeURL, baseURL string), onClientID ...func(clientID string)) func() {
 	t.Helper()
 	old := startOAuthBrowserCapture
-	startOAuthBrowserCapture = func(ctx context.Context, authorizeURL, baseURL string) (*oauthCapture, error) {
+	startOAuthBrowserCapture = func(ctx context.Context, authorizeURL, baseURL, clientID string) (*oauthCapture, error) {
 		if onStart != nil {
 			onStart(authorizeURL, baseURL)
+		}
+		if len(onClientID) > 0 && onClientID[0] != nil {
+			onClientID[0](clientID)
 		}
 		return &oauthCapture{
 			Callbacks: callbacks,
