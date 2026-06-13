@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"krill_monitor/internal/wailsui"
+	"quotaball/internal/wailsui"
 )
 
 func main() {

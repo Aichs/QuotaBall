@@ -5,7 +5,7 @@ package ui
 import (
 	"errors"
 
-	"krill_monitor/internal/krill"
+	"quotaball/internal/krill"
 )
 
 type TrayControllerOptions struct {

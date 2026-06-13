@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"sync"
+
+	"quotaball/internal/atomicfile"
 )
 
 type Store struct {
@@ -18,6 +19,11 @@ type record struct {
 	Kind  string `json:"kind"`
 	Value string `json:"value"`
 }
+
+var (
+	protectSecret   = protect
+	unprotectSecret = unprotect
+)
 
 func NewStore(path string) *Store {
 	return &Store{path: path}
@@ -42,7 +48,7 @@ func (s *Store) Get(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	plain, err := unprotect(raw)
+	plain, err := unprotectSecret(raw)
 	if err != nil {
 		return "", err
 	}
@@ -50,6 +56,13 @@ func (s *Store) Get(key string) (string, error) {
 }
 
 func (s *Store) Set(key, value string) error {
+	return s.Update(map[string]string{key: value})
+}
+
+func (s *Store) Update(values map[string]string) error {
+	if len(values) == 0 {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -57,15 +70,17 @@ func (s *Store) Set(key, value string) error {
 	if err != nil {
 		return err
 	}
-	if value == "" {
-		delete(data, key)
-		return s.write(data)
+	for key, value := range values {
+		if value == "" {
+			delete(data, key)
+			continue
+		}
+		protected, err := protectSecret([]byte(value))
+		if err != nil {
+			return err
+		}
+		data[key] = record{Kind: "dpapi", Value: base64.StdEncoding.EncodeToString(protected)}
 	}
-	protected, err := protect([]byte(value))
-	if err != nil {
-		return err
-	}
-	data[key] = record{Kind: "dpapi", Value: base64.StdEncoding.EncodeToString(protected)}
 	return s.write(data)
 }
 
@@ -82,18 +97,15 @@ func (s *Store) read() (map[string]record, error) {
 		return out, nil
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return out, nil
+		return nil, err
 	}
 	return out, nil
 }
 
 func (s *Store) write(data map[string]record) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return err
-	}
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, raw, 0o600)
+	return atomicfile.Write(s.path, raw, 0o600)
 }

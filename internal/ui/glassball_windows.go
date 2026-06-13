@@ -19,14 +19,16 @@ import (
 	. "github.com/lxn/walk/declarative"
 	"github.com/lxn/win"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/krill"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
 )
 
 const (
-	ballSize          = 190
-	ballAnimationStep = 0.24
-	ballDragThreshold = 8
+	ballSize           = 190
+	ballAnimationStep  = 0.24
+	ballDragThreshold  = 8
+	glassMetricWeekly  = "weekly"
+	glassMetricMonthly = "monthly"
 )
 
 type glassBall struct {
@@ -42,6 +44,18 @@ type glassBall struct {
 	dragging        bool
 	centerHit       bool
 	lastRenderError string
+	metricAction    *walk.Action
+}
+
+type glassMetricState struct {
+	label      string
+	pct        float64
+	used       float64
+	limit      float64
+	centerText string
+	mode       string
+	togglable  bool
+	ok         bool
 }
 
 type glassBallHost interface {
@@ -102,21 +116,26 @@ func (g *glassBall) frameLoop() {
 func (g *glassBall) installMenu() {
 	menu, _ := walk.NewMenu()
 	for _, item := range []struct {
-		text string
-		fn   func()
+		text   string
+		fn     func()
+		metric bool
 	}{
-		{"显示/隐藏面板", g.host.togglePanel},
-		{"切换当日/转结", g.toggleMetric},
-		{"立即刷新", func() { g.host.refresh(true) }},
-		{"退出", g.host.quit},
+		{"显示/隐藏面板", g.host.togglePanel, false},
+		{"切换周/月水位", g.toggleMetric, true},
+		{"立即刷新", func() { g.host.refresh(true) }, false},
+		{"退出", g.host.quit, false},
 	} {
 		act := walk.NewAction()
 		act.SetText(item.text)
 		fn := item.fn
 		act.Triggered().Attach(fn)
 		_ = menu.Actions().Add(act)
+		if item.metric {
+			g.metricAction = act
+		}
 	}
 	g.win.SetContextMenu(menu)
+	g.syncMetricAction()
 }
 
 func (g *glassBall) position() {
@@ -178,6 +197,7 @@ func (g *glassBall) setSnapshot(s krill.Snapshot) {
 	g.mu.Lock()
 	g.snap = s
 	g.mu.Unlock()
+	g.syncMetricAction()
 	if g.win != nil && !g.win.IsDisposed() && win.IsWindowVisible(g.win.Handle()) {
 		g.repaint()
 	}
@@ -185,43 +205,90 @@ func (g *glassBall) setSnapshot(s krill.Snapshot) {
 
 func (g *glassBall) activeSub() (krill.Subscription, bool) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	for _, s := range g.snap.Subscriptions {
-		if s.DailyRemaining > 0.0001 || s.ForwardedRemaining > 0.0001 {
+	snap := g.snap
+	g.mu.Unlock()
+	return activeSubFromSnapshot(snap)
+}
+
+func activeSubFromSnapshot(snap krill.Snapshot) (krill.Subscription, bool) {
+	for _, s := range snap.Subscriptions {
+		if firstPositive(s.WeeklyRemaining, s.DailyRemaining) > 0.0001 {
 			return s, true
 		}
 	}
-	for _, s := range g.snap.Subscriptions {
-		if s.DailyLimit > 0.0001 || s.ForwardedLimit > 0.0001 {
+	for _, s := range snap.Subscriptions {
+		if firstPositive(s.WeeklyLimit, s.DailyLimit) > 0.0001 {
 			return s, true
 		}
 	}
-	if len(g.snap.Subscriptions) > 0 {
-		return g.snap.Subscriptions[0], true
+	if len(snap.Subscriptions) > 0 {
+		return snap.Subscriptions[0], true
 	}
 	return krill.Subscription{}, false
 }
 
-func (g *glassBall) metric() (string, float64, float64, float64, bool) {
+func (g *glassBall) metricState() glassMetricState {
 	g.mu.Lock()
-	ok := g.snap.OK
+	snap := g.snap
+	mode := normalizedGlassMetric(g.mode)
 	g.mu.Unlock()
-	sub, has := g.activeSub()
-	if !ok || !has {
-		return "", 0, 0, 0, false
+	if !snap.OK {
+		return glassMetricState{mode: mode}
 	}
-	if g.mode == "forwarded" {
-		return "转结", sub.ForwardedPercent, sub.ForwardedUsed, sub.ForwardedLimit, true
+	if snap.Provider == config.ProviderNewAPI {
+		return glassMetricState{
+			label:      "当前余额",
+			pct:        100,
+			used:       snap.Wallet,
+			centerText: centerBalanceText(snap.Wallet),
+			mode:       glassMetricWeekly,
+			togglable:  false,
+			ok:         true,
+		}
 	}
-	return "当日", sub.DailyPercent, sub.DailyUsed, sub.DailyLimit, true
+	sub, has := activeSubFromSnapshot(snap)
+	if !has {
+		return glassMetricState{mode: mode}
+	}
+	if mode == glassMetricMonthly {
+		limit := firstPositive(sub.MonthlyLimit, sub.WeeklyLimit, sub.DailyLimit)
+		used := firstPositive(sub.MonthlyUsed, sub.WeeklyUsed, sub.DailyUsed)
+		pct := firstPositive(sub.MonthlyPercent, quotaPercent(used, limit))
+		return glassMetricState{
+			label:      "月总额度",
+			pct:        pct,
+			used:       used,
+			limit:      limit,
+			centerText: centerPercentText(pct),
+			mode:       glassMetricMonthly,
+			togglable:  true,
+			ok:         true,
+		}
+	}
+	pct := firstPositive(sub.WeeklyPercent, sub.DailyPercent)
+	return glassMetricState{
+		label:      "周额度",
+		pct:        pct,
+		used:       firstPositive(sub.WeeklyUsed, sub.DailyUsed),
+		limit:      firstPositive(sub.WeeklyLimit, sub.DailyLimit),
+		centerText: centerPercentText(pct),
+		mode:       glassMetricWeekly,
+		togglable:  true,
+		ok:         true,
+	}
+}
+
+func (g *glassBall) metric() (string, float64, float64, float64, bool) {
+	state := g.metricState()
+	return state.label, state.pct, state.used, state.limit, state.ok
 }
 
 func (g *glassBall) repaint() bool {
 	if g.win == nil || g.win.IsDisposed() {
 		return false
 	}
-	_, pct, _, _, ok := g.metric()
-	img, err := renderBallFrameImage(pct, ok, g.phase)
+	state := g.metricState()
+	img, err := renderBallFrameImageWithCenterText(state.pct, state.ok, g.phase, state.mode, state.centerText)
 	if err != nil {
 		g.handleRenderFailure("render frame", err)
 		return false
@@ -310,7 +377,7 @@ func glassBallDiagnosticPath() string {
 	if exe, err := os.Executable(); err == nil {
 		return filepath.Join(filepath.Dir(exe), "glassball-diagnostics.log")
 	}
-	return filepath.Join(os.TempDir(), "krill-glassball-diagnostics.log")
+	return filepath.Join(os.TempDir(), "quotaball-glassball-diagnostics.log")
 }
 
 func (g *glassBall) mouseDown(x, y int, button walk.MouseButton) {
@@ -371,15 +438,30 @@ func draggedBallBounds(startWindow, dragStart, cursor walk.Point) walk.Rectangle
 }
 
 func (g *glassBall) toggleMetric() {
-	if g.mode == "daily" {
-		g.mode = "forwarded"
-	} else {
-		g.mode = "daily"
+	if !g.metricToggleAllowed() {
+		return
 	}
+	g.mode = nextGlassMetric(g.mode)
 	g.host.mutateGlassConfig(func(cfg *config.Config) {
 		cfg.TbarMetric = g.mode
 	})
 	g.repaint()
+}
+
+func (g *glassBall) syncMetricAction() {
+	if g.metricAction == nil {
+		return
+	}
+	enabled := g.metricToggleAllowed()
+	_ = g.metricAction.SetVisible(enabled)
+	_ = g.metricAction.SetEnabled(enabled)
+}
+
+func (g *glassBall) metricToggleAllowed() bool {
+	g.mu.Lock()
+	provider := g.snap.Provider
+	g.mu.Unlock()
+	return provider != config.ProviderNewAPI
 }
 
 func (g *glassBall) savePos() {
@@ -393,7 +475,100 @@ func (g *glassBall) savePos() {
 	})
 }
 
+type waterPalette struct {
+	vertical        []colorStop
+	rightHighlight  []colorStop
+	leftShade       []colorStop
+	bottomGlow      []colorStop
+	surfaceMain     color.RGBA
+	surfaceShade    color.RGBA
+	surfaceSparkle  color.RGBA
+	arcLight        color.RGBA
+	arcShade        color.RGBA
+	bubbleOutline   color.RGBA
+	bubbleHighlight color.RGBA
+}
+
+func weeklyWaterPalette() waterPalette {
+	return waterPalette{
+		vertical: []colorStop{
+			{0.0, color.RGBA{0, 158, 205, 214}},
+			{0.40, color.RGBA{38, 203, 228, 230}},
+			{0.72, color.RGBA{102, 230, 238, 238}},
+			{1.0, color.RGBA{198, 255, 246, 246}},
+		},
+		rightHighlight: []colorStop{
+			{0.0, color.RGBA{238, 255, 255, 152}},
+			{0.40, color.RGBA{130, 242, 255, 92}},
+			{0.78, color.RGBA{0, 178, 222, 20}},
+			{1.0, color.RGBA{0, 0, 0, 0}},
+		},
+		leftShade: []colorStop{
+			{0.0, color.RGBA{0, 92, 135, 46}},
+			{0.58, color.RGBA{0, 166, 205, 22}},
+			{1.0, color.RGBA{0, 0, 0, 0}},
+		},
+		bottomGlow: []colorStop{
+			{0.0, color.RGBA{255, 255, 246, 138}},
+			{0.46, color.RGBA{170, 250, 248, 80}},
+			{1.0, color.RGBA{0, 32, 84, 0}},
+		},
+		surfaceMain:     color.RGBA{235, 255, 255, 196},
+		surfaceShade:    color.RGBA{0, 141, 184, 78},
+		surfaceSparkle:  color.RGBA{202, 255, 255, 62},
+		arcLight:        color.RGBA{230, 255, 255, 76},
+		arcShade:        color.RGBA{19, 151, 187, 38},
+		bubbleOutline:   color.RGBA{232, 255, 255, 152},
+		bubbleHighlight: color.RGBA{255, 255, 255, 74},
+	}
+}
+
+func monthlyWaterPalette() waterPalette {
+	return waterPalette{
+		vertical: []colorStop{
+			{0.0, color.RGBA{255, 148, 154, 204}},
+			{0.40, color.RGBA{255, 177, 180, 222}},
+			{0.72, color.RGBA{255, 211, 203, 235}},
+			{1.0, color.RGBA{255, 234, 222, 242}},
+		},
+		rightHighlight: []colorStop{
+			{0.0, color.RGBA{255, 244, 238, 150}},
+			{0.40, color.RGBA{255, 178, 180, 90}},
+			{0.78, color.RGBA{228, 92, 108, 24}},
+			{1.0, color.RGBA{0, 0, 0, 0}},
+		},
+		leftShade: []colorStop{
+			{0.0, color.RGBA{174, 60, 75, 42}},
+			{0.58, color.RGBA{235, 112, 124, 24}},
+			{1.0, color.RGBA{0, 0, 0, 0}},
+		},
+		bottomGlow: []colorStop{
+			{0.0, color.RGBA{255, 238, 226, 136}},
+			{0.46, color.RGBA{255, 190, 184, 80}},
+			{1.0, color.RGBA{75, 0, 20, 0}},
+		},
+		surfaceMain:     color.RGBA{255, 245, 242, 198},
+		surfaceShade:    color.RGBA{207, 92, 105, 86},
+		surfaceSparkle:  color.RGBA{255, 211, 212, 64},
+		arcLight:        color.RGBA{255, 232, 226, 78},
+		arcShade:        color.RGBA{207, 86, 96, 42},
+		bubbleOutline:   color.RGBA{255, 238, 232, 150},
+		bubbleHighlight: color.RGBA{255, 255, 255, 76},
+	}
+}
+
+func waterPaletteForMode(mode string) waterPalette {
+	if normalizedGlassMetric(mode) == glassMetricMonthly {
+		return monthlyWaterPalette()
+	}
+	return weeklyWaterPalette()
+}
+
 func renderBallImage(pct float64, ok bool, phase float64) image.Image {
+	return renderBallImageWithMode(pct, ok, phase, glassMetricWeekly)
+}
+
+func renderBallImageWithMode(pct float64, ok bool, phase float64, mode string) image.Image {
 	img := image.NewRGBA(image.Rect(0, 0, ballSize, ballSize))
 	fillImageRGBA(img, transparentKeyColor())
 
@@ -408,7 +583,7 @@ func renderBallImage(pct float64, ok bool, phase float64) image.Image {
 
 	drawSphereShadow(img, rect)
 	drawBackGlass(img, rect)
-	drawWater(img, rect, pct, phase)
+	drawWater(img, rect, pct, phase, waterPaletteForMode(mode))
 	drawEquatorBand(img, rect)
 	drawFrontGlass(img, rect)
 	drawCenter(img, pct)
@@ -418,10 +593,22 @@ func renderBallImage(pct float64, ok bool, phase float64) image.Image {
 	return img
 }
 
-func renderBallFrameImage(pct float64, ok bool, phase float64) (*image.RGBA, error) {
-	base := toRGBA(renderBallImage(pct, ok, phase))
+func renderBallFrameImage(pct float64, ok bool, phase float64, modes ...string) (*image.RGBA, error) {
+	mode := glassMetricWeekly
+	if len(modes) > 0 {
+		mode = normalizedGlassMetric(modes[0])
+	}
+	return renderBallFrameImageWithCenterText(pct, ok, phase, mode, centerPercentText(pct))
+}
+
+func renderBallFrameImageWithCenterText(pct float64, ok bool, phase float64, mode string, centerText string) (*image.RGBA, error) {
+	mode = normalizedGlassMetric(mode)
+	base := toRGBA(renderBallImageWithMode(pct, ok, phase, mode))
 	if ok {
-		_ = drawCenterPercentImage(base, pct)
+		if centerText == "" {
+			centerText = centerPercentText(pct)
+		}
+		_ = drawCenterValueImage(base, centerText)
 		return base, nil
 	}
 	_ = drawBallTextImage(base, ok)
@@ -429,15 +616,20 @@ func renderBallFrameImage(pct float64, ok bool, phase float64) (*image.RGBA, err
 }
 
 func drawCenterPercentImage(img *image.RGBA, pct float64) error {
+	return drawCenterValueImage(img, centerPercentText(pct))
+}
+
+func drawCenterValueImage(img *image.RGBA, text string) error {
+	pointSize, rect := centerValueTextStyle(text)
 	return applyCachedTextMask(
 		img,
-		"percent:"+centerPercentText(pct),
-		centerPercentText(pct),
+		"center:"+text,
+		text,
 		"Microsoft YaHei UI",
-		8,
+		pointSize,
 		walk.FontBold,
 		color.RGBA{30, 58, 66, 235},
-		centerPercentRect(),
+		rect,
 		walk.TextCenter|walk.TextVCenter|walk.TextSingleLine,
 	)
 }
@@ -450,6 +642,32 @@ func centerPercentText(pct float64) string {
 func centerPercentRect() walk.Rectangle {
 	cx, cy := ballCenter(ballRect())
 	return walk.Rectangle{X: int(math.Round(cx)) - 20, Y: int(math.Round(cy)) - 9, Width: 40, Height: 18}
+}
+
+func centerValueTextStyle(text string) (int, walk.Rectangle) {
+	if len(text) <= 4 {
+		return 8, centerPercentRect()
+	}
+	cx, cy := ballCenter(ballRect())
+	return 7, walk.Rectangle{X: int(math.Round(cx)) - 28, Y: int(math.Round(cy)) - 9, Width: 56, Height: 18}
+}
+
+func centerBalanceText(value float64) string {
+	value = math.Max(0, value)
+	switch {
+	case value >= 1000000:
+		return fmt.Sprintf("$%.1fm", value/1000000)
+	case value >= 10000:
+		return fmt.Sprintf("$%.0fk", value/1000)
+	case value >= 1000:
+		return fmt.Sprintf("$%.1fk", value/1000)
+	case value >= 100:
+		return fmt.Sprintf("$%.0f", value)
+	case value >= 10:
+		return fmt.Sprintf("$%.1f", value)
+	default:
+		return fmt.Sprintf("$%.2f", value)
+	}
 }
 
 func toRGBA(src image.Image) *image.RGBA {
@@ -473,7 +691,7 @@ func drawBallTextImage(img *image.RGBA, ok bool) error {
 		return applyCachedTextMask(
 			img,
 			"title:refreshing",
-			"Krill AI\n刷新中",
+			"QuotaBall\n刷新中",
 			"Microsoft YaHei UI",
 			13,
 			walk.FontBold,
@@ -740,10 +958,17 @@ func transparentKeyColor() color.RGBA {
 }
 
 func normalizedGlassMetric(mode string) string {
-	if mode == "forwarded" {
-		return "forwarded"
+	if mode == glassMetricMonthly {
+		return glassMetricMonthly
 	}
-	return "daily"
+	return glassMetricWeekly
+}
+
+func nextGlassMetric(mode string) string {
+	if normalizedGlassMetric(mode) == glassMetricWeekly {
+		return glassMetricMonthly
+	}
+	return glassMetricWeekly
 }
 
 func ballCenter(r ballFloatRect) (float64, float64) {
@@ -824,7 +1049,7 @@ func drawBackGlass(img *image.RGBA, r ballFloatRect) {
 	}
 }
 
-func drawWater(img *image.RGBA, r ballFloatRect, pct, phase float64) {
+func drawWater(img *image.RGBA, r ballFloatRect, pct, phase float64, palette waterPalette) {
 	pct = math.Max(0, math.Min(100, pct))
 	cx, cy, rad := r.cx(), r.cy(), r.rad()
 	waterY := waterBaseY(r, pct)
@@ -839,35 +1064,22 @@ func drawWater(img *image.RGBA, r ballFloatRect, pct, phase float64) {
 				continue
 			}
 			depth := clamp01((py - surface) / math.Max(1, r.bottom-surface))
-			col := verticalWater(depth)
+			col := verticalWater(depth, palette)
 			sourceOverPixel(img, x, y, col, clamp01((py-surface+1.6)/3.2))
 
 			rightT := clamp01(math.Hypot(px-(cx+62), py-(cy+49)) / 72)
-			sourceOverPixel(img, x, y, multiStopColor(rightT,
-				colorStop{0.0, color.RGBA{238, 255, 255, 152}},
-				colorStop{0.40, color.RGBA{130, 242, 255, 92}},
-				colorStop{0.78, color.RGBA{0, 178, 222, 20}},
-				colorStop{1.0, color.RGBA{0, 0, 0, 0}},
-			), 1)
+			sourceOverPixel(img, x, y, multiStopColor(rightT, palette.rightHighlight...), 1)
 
 			leftT := clamp01(math.Hypot(px-(cx-72), py-(cy+34)) / 88)
-			sourceOverPixel(img, x, y, multiStopColor(leftT,
-				colorStop{0.0, color.RGBA{0, 92, 135, 46}},
-				colorStop{0.58, color.RGBA{0, 166, 205, 22}},
-				colorStop{1.0, color.RGBA{0, 0, 0, 0}},
-			), 1)
+			sourceOverPixel(img, x, y, multiStopColor(leftT, palette.leftShade...), 1)
 
 			bottomT := clamp01(math.Hypot(px-(cx-8), py-(cy+74)) / 86)
-			sourceOverPixel(img, x, y, multiStopColor(bottomT,
-				colorStop{0.0, color.RGBA{255, 255, 246, 138}},
-				colorStop{0.46, color.RGBA{170, 250, 248, 80}},
-				colorStop{1.0, color.RGBA{0, 32, 84, 0}},
-			), 1)
+			sourceOverPixel(img, x, y, multiStopColor(bottomT, palette.bottomGlow...), 1)
 		}
 	}
-	drawWaterSurface(img, r, waterY, phase, pct)
-	drawWaterArcs(img, r, pct, phase)
-	drawBubbles(img, r, pct, phase)
+	drawWaterSurface(img, r, waterY, phase, pct, palette)
+	drawWaterArcs(img, r, pct, phase, palette)
+	drawBubbles(img, r, pct, phase, palette)
 }
 
 func waterBaseY(r ballFloatRect, pct float64) float64 {
@@ -903,19 +1115,19 @@ func drawWaveLine(img *image.RGBA, r ballFloatRect, waterY, phase, pct float64, 
 	}
 }
 
-func drawWaterSurface(img *image.RGBA, r ballFloatRect, waterY, phase, pct float64) {
-	drawWaveLine(img, r, waterY, phase, pct, color.RGBA{235, 255, 255, 196}, 2)
-	drawWaveLine(img, r, waterY+2.6, phase, pct, color.RGBA{0, 141, 184, 78}, 1)
-	drawWaveLine(img, r, waterY+12, phase+1.8, pct, color.RGBA{202, 255, 255, 62}, 1)
+func drawWaterSurface(img *image.RGBA, r ballFloatRect, waterY, phase, pct float64, palette waterPalette) {
+	drawWaveLine(img, r, waterY, phase, pct, palette.surfaceMain, 2)
+	drawWaveLine(img, r, waterY+2.6, phase, pct, palette.surfaceShade, 1)
+	drawWaveLine(img, r, waterY+12, phase+1.8, pct, palette.surfaceSparkle, 1)
 }
 
-func drawWaterArcs(img *image.RGBA, r ballFloatRect, pct, phase float64) {
+func drawWaterArcs(img *image.RGBA, r ballFloatRect, pct, phase float64, palette waterPalette) {
 	waterY := waterBaseY(r, pct)
-	drawArcRect(img, r.left+22, waterY+8, r.w()+14, 58, 196, 118, color.RGBA{230, 255, 255, 76}, 1.2)
-	drawArcRect(img, r.left+34, waterY+25, r.w()-12, 72, 198, 110, color.RGBA{19, 151, 187, 38}, 1.0)
+	drawArcRect(img, r.left+22, waterY+8, r.w()+14, 58, 196, 118, palette.arcLight, 1.2)
+	drawArcRect(img, r.left+34, waterY+25, r.w()-12, 72, 198, 110, palette.arcShade, 1.0)
 }
 
-func drawBubbles(img *image.RGBA, r ballFloatRect, pct, phase float64) {
+func drawBubbles(img *image.RGBA, r ballFloatRect, pct, phase float64, palette waterPalette) {
 	if pct < 5 {
 		return
 	}
@@ -937,8 +1149,8 @@ func drawBubbles(img *image.RGBA, r ballFloatRect, pct, phase float64) {
 		if y <= surface+5 {
 			y = surface + 11 + s.rad
 		}
-		drawEllipseOutline(img, x, y, s.rad, s.rad, color.RGBA{232, 255, 255, 152}, 1.2, 1.0)
-		drawEllipseOutline(img, x-0.7, y-0.7, s.rad*0.62, s.rad*0.62, color.RGBA{255, 255, 255, 74}, 0.8, 1.0)
+		drawEllipseOutline(img, x, y, s.rad, s.rad, palette.bubbleOutline, 1.2, 1.0)
+		drawEllipseOutline(img, x-0.7, y-0.7, s.rad*0.62, s.rad*0.62, palette.bubbleHighlight, 0.8, 1.0)
 	}
 }
 
@@ -1197,14 +1409,8 @@ func angleInArc(angle, start, end float64) bool {
 	return angle >= start || angle <= end
 }
 
-func verticalWater(depth float64) color.RGBA {
-	t := clamp01(depth)
-	return multiStopColor(t,
-		colorStop{0.0, color.RGBA{0, 158, 205, 214}},
-		colorStop{0.40, color.RGBA{38, 203, 228, 230}},
-		colorStop{0.72, color.RGBA{102, 230, 238, 238}},
-		colorStop{1.0, color.RGBA{198, 255, 246, 246}},
-	)
+func verticalWater(depth float64, palette waterPalette) color.RGBA {
+	return multiStopColor(clamp01(depth), palette.vertical...)
 }
 
 func drawCenter(img *image.RGBA, pct float64) {

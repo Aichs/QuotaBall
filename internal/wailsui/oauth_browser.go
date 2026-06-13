@@ -22,7 +22,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"krill_monitor/internal/newapi"
+	"quotaball/internal/newapi"
 )
 
 var startOAuthBrowserCapture = startDefaultOAuthBrowserCapture

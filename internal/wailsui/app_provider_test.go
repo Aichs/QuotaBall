@@ -2,16 +2,22 @@ package wailsui
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/krill"
-	"krill_monitor/internal/newapi"
-	"krill_monitor/internal/paths"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
+	"quotaball/internal/newapi"
+	"quotaball/internal/paths"
+	"quotaball/internal/secret"
 )
 
 func TestStartNewAPIOAuthDoesNotPersistProviderBeforeCompletion(t *testing.T) {
@@ -166,6 +172,229 @@ func TestSaveSettingsDoesNotActivateSub2Placeholder(t *testing.T) {
 	}
 }
 
+func TestSaveSettingsIgnoresGlassToggleForNewAPIProvider(t *testing.T) {
+	cfg := config.Default()
+	cfg.Provider = config.ProviderNewAPI
+	cfg.TbarEnabled = false
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	app := &App{
+		paths:  paths.Paths{Config: configPath},
+		cfg:    cfg,
+		svc:    &krill.Service{},
+		newSvc: &newapi.Service{},
+	}
+
+	got, err := app.SaveSettings(SettingsRequest{
+		RefreshSec:    cfg.RefreshSec,
+		OnTop:         cfg.OnTop,
+		GlassEnabled:  true,
+		RememberLogin: cfg.RememberLogin,
+		Provider:      config.ProviderNewAPI,
+		NewAPIBaseURL: "https://newapi.example.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.cfg.TbarEnabled || got.GlassEnabled {
+		t.Fatalf("NewAPI settings must not expose or change glass toggle, cfg=%t dto=%t", app.cfg.TbarEnabled, got.GlassEnabled)
+	}
+}
+
+func TestSaveSettingsDoesNotCommitOrClearSavedLoginWhenConfigSaveFails(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := config.Save(configPath, config.Config{
+		Email:         "user@example.com",
+		Provider:      config.ProviderKrill,
+		RememberLogin: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secretStore := secret.NewStore(filepath.Join(dir, "secrets.json"))
+	if err := secretStore.Set("password", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.Set("token", "token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(configPath, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if err := makePathDirectory(configPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Email = "user@example.com"
+	cfg.RememberLogin = true
+	app := &App{
+		paths: paths.Paths{Config: configPath},
+		cfg:   cfg,
+		svc: &krill.Service{
+			Config:  &cfg,
+			Secrets: secretStore,
+		},
+		newSvc: &newapi.Service{Secrets: secretStore},
+	}
+
+	_, err := app.SaveSettings(SettingsRequest{
+		RefreshSec:    cfg.RefreshSec,
+		OnTop:         cfg.OnTop,
+		GlassEnabled:  cfg.TbarEnabled,
+		RememberLogin: false,
+		Provider:      config.ProviderKrill,
+	})
+	if err == nil {
+		t.Fatal("SaveSettings should return config save error")
+	}
+	if !app.cfg.RememberLogin {
+		t.Fatal("SaveSettings should not commit in-memory config after save failure")
+	}
+	password, err := secretStore.Get("password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if password != "secret" {
+		t.Fatalf("saved password = %q, want preserved secret", password)
+	}
+	token, err := secretStore.Get("token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "token" {
+		t.Fatalf("saved token = %q, want preserved token", token)
+	}
+}
+
+func TestLoginCanSupersedeInFlightRefresh(t *testing.T) {
+	subscriptionStarted := make(chan struct{})
+	releaseStaleRefresh := make(chan struct{})
+	var subscriptionOnce sync.Once
+	var mu sync.Mutex
+	subscriptionRequests := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/login":
+			writeKrillAPITestResponse(t, w, map[string]string{"token": testWailsJWT(time.Now().Add(time.Hour))})
+		case "/api/subscription":
+			mu.Lock()
+			subscriptionRequests++
+			requestNo := subscriptionRequests
+			mu.Unlock()
+			if requestNo == 1 {
+				subscriptionOnce.Do(func() { close(subscriptionStarted) })
+				<-releaseStaleRefresh
+				writeKrillAPITestResponse(t, w, minimalWailsKrillPayload(10))
+				return
+			}
+			writeKrillAPITestResponse(t, w, minimalWailsKrillPayload(99))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	secretStore := secret.NewStore(filepath.Join(dir, "secrets.json"))
+	if err := secretStore.Set("token", testWailsJWT(time.Now().Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Email = "old@example.com"
+	cfg.RememberLogin = true
+	configPath := filepath.Join(dir, "config.json")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		paths: paths.Paths{Config: configPath},
+		cfg:   cfg,
+		snap:  krill.EmptySnapshot("old"),
+	}
+	app.svc = &krill.Service{
+		Client:  &krill.Client{BaseURL: server.URL, HTTPClient: server.Client()},
+		Config:  &app.cfg,
+		Secrets: secretStore,
+	}
+	app.svc.Configure(app.cfg)
+	app.newSvc = &newapi.Service{Config: &app.cfg, Secrets: secretStore}
+	app.newSvc.Configure(app.cfg)
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, err := app.refresh(false)
+		refreshDone <- err
+	}()
+	<-subscriptionStarted
+
+	snap, err := app.Login(LoginRequest{
+		Provider:      config.ProviderKrill,
+		Email:         "new@example.com",
+		Password:      "secret",
+		RememberLogin: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.LoggedIn || snap.Summary.TotalDailyQuotaUSD != 99 {
+		t.Fatalf("login snapshot = %#v, want logged-in quota 99", snap)
+	}
+
+	close(releaseStaleRefresh)
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("stale refresh returned error: %v", err)
+	}
+
+	got, err := app.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Email != "new@example.com" || got.Summary.TotalDailyQuotaUSD != 99 {
+		t.Fatalf("stale refresh overwrote login snapshot: %#v", got)
+	}
+	if subscriptionRequests != 2 {
+		t.Fatalf("subscriptionRequests = %d, want refresh + login fetch", subscriptionRequests)
+	}
+}
+
+func TestMigratePlaintextPasswordKeepsLegacyPasswordWhenSecretWriteFails(t *testing.T) {
+	cfg := config.Default()
+	cfg.Password = "legacy-secret"
+	storeErr := errors.New("secret write failed")
+	saveCalled := false
+
+	got := migratePlaintextPassword(cfg, "config.json", failingSecretSetter{err: storeErr}, func(string, config.Config) error {
+		saveCalled = true
+		return nil
+	})
+
+	if got.Password != "legacy-secret" {
+		t.Fatalf("Password = %q, want legacy password preserved", got.Password)
+	}
+	if saveCalled {
+		t.Fatal("config save should not run when secret migration fails")
+	}
+}
+
+func TestMigratePlaintextPasswordKeepsSecretWhenConfigCleanupFails(t *testing.T) {
+	cfg := config.Default()
+	cfg.Password = "legacy-secret"
+	store := recordingSecretSetter{}
+	saveErr := errors.New("config save failed")
+
+	got := migratePlaintextPassword(cfg, "config.json", &store, func(string, config.Config) error {
+		return saveErr
+	})
+
+	if got.Password != "" {
+		t.Fatalf("Password = %q, want in-memory password cleared after secret write", got.Password)
+	}
+	if store.values["password"] != "legacy-secret" {
+		t.Fatalf("migrated secret = %q, want legacy password", store.values["password"])
+	}
+}
+
 func TestNextOAuthCallbackPrefersBufferedCallbackWhenBrowserDone(t *testing.T) {
 	baseURL := testHTTPBaseURL(t)
 	code, state := testOAuthCodeState(t)
@@ -285,4 +514,54 @@ func writeWailsAPITestResponse(t *testing.T, w http.ResponseWriter, data any) {
 	if err := json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeKrillAPITestResponse(t *testing.T, w http.ResponseWriter, data any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func minimalWailsKrillPayload(totalDailyQuota float64) map[string]any {
+	return map[string]any{
+		"summary": map[string]any{
+			"total_used_usd":        1,
+			"total_daily_quota_usd": totalDailyQuota,
+		},
+		"subscriptions": []any{},
+	}
+}
+
+func testWailsJWT(exp time.Time) string {
+	payload, _ := json.Marshal(map[string]int64{"exp": exp.Unix()})
+	return "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+func makePathDirectory(path string) error {
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return os.Mkdir(path, 0o700)
+}
+
+type failingSecretSetter struct {
+	err error
+}
+
+func (s failingSecretSetter) Set(string, string) error {
+	return s.err
+}
+
+type recordingSecretSetter struct {
+	values map[string]string
+}
+
+func (s *recordingSecretSetter) Set(key, value string) error {
+	if s.values == nil {
+		s.values = map[string]string{}
+	}
+	s.values[key] = value
+	return nil
 }

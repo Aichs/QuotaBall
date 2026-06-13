@@ -23,6 +23,7 @@ type Snapshot struct {
 	LoggedIn      bool
 	Email         string
 	Loading       bool
+	Provider      string
 }
 
 func EmptySnapshot(message string) Snapshot {
@@ -39,6 +40,16 @@ func (s Snapshot) RemainingDaily() float64 {
 	return math.Max(0, s.Summary.TotalDailyQuotaUSD-s.Spend)
 }
 
+func (s Snapshot) RemainingWeekly() float64 {
+	if s.Summary.TotalWeeklyRemainingUSD > 0 {
+		return math.Max(0, s.Summary.TotalWeeklyRemainingUSD)
+	}
+	if s.Summary.TotalWeeklyQuotaUSD > 0 {
+		return math.Max(0, s.Summary.TotalWeeklyQuotaUSD-s.Spend)
+	}
+	return s.RemainingDaily()
+}
+
 type Summary struct {
 	TotalUsedUSD                 float64 `json:"total_used_usd"`
 	TotalDailyQuotaUSD           float64 `json:"total_daily_quota_usd"`
@@ -50,6 +61,11 @@ type Summary struct {
 	TotalDailyForwardedQuotaUSD  float64 `json:"total_daily_forwarded_quota_usd"`
 	TotalDailyForwardedUsedUSD   float64 `json:"total_daily_forwarded_used_usd"`
 	TotalDailyForwardedRemainUSD float64 `json:"total_daily_forwarded_remain_usd"`
+	TotalWeeklyQuotaUSD          float64 `json:"-"`
+	TotalWeeklyRemainingUSD      float64 `json:"-"`
+	TotalMonthlyQuotaUSD         float64 `json:"-"`
+	TotalMonthlyUsedUSD          float64 `json:"-"`
+	TotalMonthlyRemainingUSD     float64 `json:"-"`
 }
 
 type Subscription struct {
@@ -67,6 +83,14 @@ type Subscription struct {
 	ForwardedUsed      float64
 	ForwardedRemaining float64
 	ForwardedPercent   float64
+	WeeklyLimit        float64
+	WeeklyUsed         float64
+	WeeklyRemaining    float64
+	WeeklyPercent      float64
+	MonthlyLimit       float64
+	MonthlyUsed        float64
+	MonthlyRemaining   float64
+	MonthlyPercent     float64
 }
 
 type SubscriptionPayload struct {
@@ -78,6 +102,8 @@ type SubscriptionPayload struct {
 }
 
 type looseFloat float64
+
+type looseInt int
 
 type looseString string
 
@@ -134,6 +160,37 @@ func (f *looseFloat) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (i *looseInt) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "" || raw == "null" {
+		*i = 0
+		return nil
+	}
+	if strings.HasPrefix(raw, `"`) {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			*i = 0
+			return nil
+		}
+		v, err := strconv.Atoi(s)
+		if err != nil {
+			return err
+		}
+		*i = looseInt(v)
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*i = looseInt(n)
+	return nil
+}
+
 func (s *Summary) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		TotalUsedUSD                 looseFloat `json:"total_used_usd"`
@@ -161,6 +218,9 @@ func (s *Summary) UnmarshalJSON(data []byte) error {
 		TotalDailyForwardedQuotaUSD:  float64(raw.TotalDailyForwardedQuotaUSD),
 		TotalDailyForwardedUsedUSD:   float64(raw.TotalDailyForwardedUsedUSD),
 		TotalDailyForwardedRemainUSD: float64(raw.TotalDailyForwardedRemainUSD),
+		TotalWeeklyQuotaUSD:          float64(raw.TotalDailyQuotaUSD),
+		TotalWeeklyRemainingUSD:      firstPositive(float64(raw.TotalRemainingUSD), float64(raw.TotalDailyRemainingUSD), math.Max(0, float64(raw.TotalDailyQuotaUSD)-float64(raw.TotalUsedUSD))),
+		TotalMonthlyUsedUSD:          float64(raw.TotalUsedUSD),
 	}
 	return nil
 }
@@ -183,11 +243,12 @@ func (p *SubscriptionPayload) UnmarshalJSON(data []byte) error {
 }
 
 type SubscriptionRecord struct {
-	SubscriptionID      string `json:"subscription_id"`
-	SubscriptionStartAt string `json:"subscription_start_at"`
-	SubscriptionEndAt   string `json:"subscription_end_at"`
-	Plan                Plan   `json:"plan"`
-	Quota               Quota  `json:"quota"`
+	SubscriptionID      string  `json:"subscription_id"`
+	SubscriptionStartAt string  `json:"subscription_start_at"`
+	SubscriptionEndAt   string  `json:"subscription_end_at"`
+	TotalUsedUSD        float64 `json:"total_used_usd"`
+	Plan                Plan    `json:"plan"`
+	Quota               Quota   `json:"quota"`
 }
 
 func (r *SubscriptionRecord) UnmarshalJSON(data []byte) error {
@@ -195,6 +256,7 @@ func (r *SubscriptionRecord) UnmarshalJSON(data []byte) error {
 		SubscriptionID      looseString `json:"subscription_id"`
 		SubscriptionStartAt string      `json:"subscription_start_at"`
 		SubscriptionEndAt   string      `json:"subscription_end_at"`
+		TotalUsedUSD        looseFloat  `json:"total_used_usd"`
 		Plan                Plan        `json:"plan"`
 		Quota               Quota       `json:"quota"`
 	}
@@ -205,6 +267,7 @@ func (r *SubscriptionRecord) UnmarshalJSON(data []byte) error {
 		SubscriptionID:      string(raw.SubscriptionID),
 		SubscriptionStartAt: raw.SubscriptionStartAt,
 		SubscriptionEndAt:   raw.SubscriptionEndAt,
+		TotalUsedUSD:        float64(raw.TotalUsedUSD),
 		Plan:                raw.Plan,
 		Quota:               raw.Quota,
 	}
@@ -212,8 +275,32 @@ func (r *SubscriptionRecord) UnmarshalJSON(data []byte) error {
 }
 
 type Plan struct {
-	Name           string   `json:"name"`
-	EntryRouteKeys []string `json:"entry_route_keys"`
+	Name           string
+	EntryRouteKeys []string
+	BillingType    string
+	DurationDays   int
+	TotalCredits   float64
+}
+
+func (p *Plan) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Name           string     `json:"name"`
+		EntryRouteKeys []string   `json:"entry_route_keys"`
+		BillingType    string     `json:"billing_type"`
+		DurationDays   looseInt   `json:"duration_days"`
+		TotalCredits   looseFloat `json:"total_credits"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = Plan{
+		Name:           raw.Name,
+		EntryRouteKeys: append([]string(nil), raw.EntryRouteKeys...),
+		BillingType:    raw.BillingType,
+		DurationDays:   int(raw.DurationDays),
+		TotalCredits:   float64(raw.TotalCredits),
+	}
+	return nil
 }
 
 type Quota struct {
@@ -250,15 +337,34 @@ func (q *Quota) UnmarshalJSON(data []byte) error {
 
 func (p SubscriptionPayload) ToSnapshot(now time.Time) Snapshot {
 	subs := make([]Subscription, 0, len(p.Subscriptions))
+	summary := p.Summary
+	var monthlyQuota float64
 	for _, rec := range p.Subscriptions {
-		subs = append(subs, rec.ToSubscription(now))
+		sub := rec.ToSubscription(now)
+		monthlyQuota += sub.MonthlyLimit
+		subs = append(subs, sub)
+	}
+	if summary.TotalWeeklyQuotaUSD == 0 {
+		summary.TotalWeeklyQuotaUSD = summary.TotalDailyQuotaUSD
+	}
+	if summary.TotalWeeklyRemainingUSD == 0 && summary.TotalWeeklyQuotaUSD > 0 {
+		summary.TotalWeeklyRemainingUSD = firstPositive(summary.TotalRemainingUSD, summary.TotalDailyRemainingUSD, math.Max(0, summary.TotalWeeklyQuotaUSD-summary.TotalUsedUSD))
+	}
+	if monthlyQuota > 0 {
+		summary.TotalMonthlyQuotaUSD = monthlyQuota
+	}
+	if summary.TotalMonthlyUsedUSD == 0 {
+		summary.TotalMonthlyUsedUSD = summary.TotalUsedUSD
+	}
+	if summary.TotalMonthlyQuotaUSD > 0 {
+		summary.TotalMonthlyRemainingUSD = math.Max(0, summary.TotalMonthlyQuotaUSD-summary.TotalMonthlyUsedUSD)
 	}
 	return Snapshot{
 		Spend:         p.Summary.TotalUsedUSD,
 		Wallet:        p.CreditBalanceUSD + p.WelfareBalanceUSD,
 		Req:           "-",
 		Cache:         "-",
-		Summary:       p.Summary,
+		Summary:       summary,
 		Subscriptions: subs,
 		Time:          now,
 		OK:            true,
@@ -281,6 +387,15 @@ func (r SubscriptionRecord) ToSubscription(now time.Time) Subscription {
 		startDate = startDate[:10]
 	}
 
+	weeklyLimit := r.Quota.DailyLimitUSD
+	weeklyUsed := r.Quota.UsedUSD
+	weeklyRemaining := r.Quota.RemainingUSD
+	monthlyLimit := monthlyQuotaLimit(r.Plan, weeklyLimit)
+	monthlyUsed := r.TotalUsedUSD
+	if monthlyUsed == 0 {
+		monthlyUsed = weeklyUsed
+	}
+
 	return Subscription{
 		ID:                 r.SubscriptionID,
 		Name:               r.Plan.Name,
@@ -296,7 +411,41 @@ func (r SubscriptionRecord) ToSubscription(now time.Time) Subscription {
 		ForwardedUsed:      r.Quota.ForwardedUsedUSD,
 		ForwardedRemaining: r.Quota.ForwardedRemainingUSD,
 		ForwardedPercent:   percent(r.Quota.ForwardedUsedUSD, r.Quota.ForwardedLimitUSD),
+		WeeklyLimit:        weeklyLimit,
+		WeeklyUsed:         weeklyUsed,
+		WeeklyRemaining:    weeklyRemaining,
+		WeeklyPercent:      percent(weeklyUsed, weeklyLimit),
+		MonthlyLimit:       monthlyLimit,
+		MonthlyUsed:        monthlyUsed,
+		MonthlyRemaining:   math.Max(0, monthlyLimit-monthlyUsed),
+		MonthlyPercent:     percent(monthlyUsed, monthlyLimit),
 	}
+}
+
+func monthlyQuotaLimit(plan Plan, weeklyLimit float64) float64 {
+	if plan.TotalCredits > 0 {
+		return plan.TotalCredits
+	}
+	if weeklyLimit <= 0 {
+		return 0
+	}
+	if plan.DurationDays <= 0 {
+		return weeklyLimit
+	}
+	windows := math.Floor(float64(plan.DurationDays) / 7)
+	if windows < 1 {
+		windows = 1
+	}
+	return weeklyLimit * windows
+}
+
+func firstPositive(values ...float64) float64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func percent(used, limit float64) float64 {

@@ -10,6 +10,7 @@ const state = {
     glassEnabled: true,
   },
   snapshot: {
+    provider: "krill",
     spend: 0,
     wallet: 0,
     req: "-",
@@ -75,6 +76,19 @@ function plainNumber(value, digits = 0) {
   })}`;
 }
 
+function coalescedNumber(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") {
+      continue;
+    }
+    const n = Number(value);
+    if (Number.isFinite(n)) {
+      return n;
+    }
+  }
+  return 0;
+}
+
 function text(value, fallback = "") {
   if (value === null || value === undefined || value === "") {
     return fallback;
@@ -96,14 +110,55 @@ function pct(value) {
 }
 
 function statCards(snapshot) {
-  const summary = snapshot.summary || {};
-  const totalDaily = Number(summary.totalDailyQuotaUsd || 0);
-  const forwardedRemaining = Number(summary.totalForwardedRemainingUsd || 0);
+  if (isNewAPIProvider(snapshot)) {
+    return newAPIStatCards(snapshot);
+  }
+  return krillStatCards(snapshot);
+}
+
+function isNewAPIProvider(snapshot) {
+  return text(snapshot?.provider || state.config.provider || "krill") === "newapi";
+}
+
+function newAPIStatCards(snapshot) {
   return [
     {
-      title: "今日花费",
+      title: "当前余额",
+      value: money(snapshot.wallet, 2),
+      sub: "可用余额",
+      color: "#28b8ff",
+    },
+    {
+      title: "历史消耗",
       value: money(snapshot.spend, 2),
-      sub: `转结 ${money(forwardedRemaining, 2)} · 剩余 ${money(Math.max(0, totalDaily - Number(snapshot.spend || 0)), 2)}`,
+      sub: "累计已用额度",
+      color: "#ffad2f",
+    },
+    {
+      title: "请求次数",
+      value: text(snapshot.req, "-"),
+      sub: "累计请求数",
+      color: "#31df9a",
+    },
+  ];
+}
+
+function krillStatCards(snapshot) {
+  const summary = snapshot.summary || {};
+  const weeklyLimit = coalescedNumber(summary.totalWeeklyQuotaUsd, summary.totalDailyQuotaUsd);
+  const weeklyRemaining = coalescedNumber(
+    summary.totalWeeklyRemainingUsd,
+    summary.totalRemainingUsd,
+    Math.max(0, weeklyLimit - Number(snapshot.spend || 0)),
+  );
+  const weeklyUsed = Math.max(0, weeklyLimit - weeklyRemaining);
+  const monthlyLimit = coalescedNumber(summary.totalMonthlyQuotaUsd);
+  const monthlyUsed = coalescedNumber(summary.totalMonthlyUsedUsd, summary.totalUsedUsd, snapshot.spend);
+  return [
+    {
+      title: "本周剩余",
+      value: money(weeklyRemaining, 2),
+      sub: `已用 ${money(weeklyUsed, 2)} / 总计 ${money(weeklyLimit, 2)}`,
       color: "#ffad2f",
     },
     {
@@ -113,15 +168,15 @@ function statCards(snapshot) {
       color: "#28b8ff",
     },
     {
-      title: "日额度",
-      value: plainNumber(totalDaily, 0),
-      sub: `已用 ${money(snapshot.spend, 2)} / 总计 ${plainNumber(totalDaily, 0)}`,
+      title: "周额度",
+      value: plainNumber(weeklyLimit, 0),
+      sub: `剩余 ${money(weeklyRemaining, 2)}`,
       color: "#31df9a",
     },
     {
-      title: "缓存率",
-      value: text(snapshot.cache, "-"),
-      sub: "缓存命中 / 请求数",
+      title: "月总额度",
+      value: monthlyLimit > 0 ? plainNumber(monthlyLimit, 0) : "-",
+      sub: monthlyLimit > 0 ? `已用 ${money(monthlyUsed, 2)} / 总计 ${plainNumber(monthlyLimit, 0)}` : `已用 ${money(monthlyUsed, 2)}`,
       color: "#9b7cff",
     },
   ];
@@ -167,20 +222,26 @@ function renderMainPanel(s) {
           ${renderHeader(s)}
           <div class="error">${escapeHTML(s.err || "")}</div>
           ${renderStats(s)}
-          <div class="section-row">
-            <div class="section-title">套餐</div>
-            <div class="muted">${subs.length} 张</div>
-            <div class="spacer"></div>
-          </div>
-          <div class="scroll">
-            <div class="subs">
-              ${subs.length ? subs.map(renderSub).join("") : `<div class="empty"></div>`}
-            </div>
-          </div>
+          ${isNewAPIProvider(s) ? "" : renderSubscriptionSection(subs)}
         </div>
       </section>
       ${renderModal()}
     </main>
+  `;
+}
+
+function renderSubscriptionSection(subs) {
+  return `
+    <div class="section-row">
+      <div class="section-title">套餐</div>
+      <div class="muted">${subs.length} 张</div>
+      <div class="spacer"></div>
+    </div>
+    <div class="scroll">
+      <div class="subs">
+        ${subs.length ? subs.map(renderSub).join("") : `<div class="empty"></div>`}
+      </div>
+    </div>
   `;
 }
 
@@ -189,12 +250,13 @@ function renderHeader(s) {
     <header class="header">
       <div class="logo">◒</div>
       <div class="brand">
-        <div class="title">Krill</div>
+        <div class="title">QuotaBall</div>
         <div class="subtitle">额度监控</div>
       </div>
       <div class="time">${escapeHTML(s.timeLabel || "")}</div>
       <div class="spacer"></div>
       <button class="icon-btn" data-action="settings" title="设置">⚙</button>
+      <button class="icon-btn" data-action="about" title="关于">i</button>
       <button class="icon-btn" data-action="refresh" title="立即刷新">↻</button>
       <button class="icon-btn" data-action="hide" title="隐藏">—</button>
       <button class="auth-btn" data-action="auth">${s.loggedIn ? "退出登录" : "登录"}</button>
@@ -218,6 +280,7 @@ function renderStats(s) {
 
 function renderSub(sub) {
   const routes = Array.isArray(sub.routes) ? sub.routes.slice(0, 6) : [];
+  const quota = subQuota(sub);
   return `
     <section class="sub-card">
       <div class="sub-top">
@@ -226,10 +289,25 @@ function renderSub(sub) {
       </div>
       <div class="sub-detail">#${escapeHTML(sub.id)}  ·  ${escapeHTML(sub.start)} → ${escapeHTML(sub.end)}</div>
       ${routes.length ? `<div class="routes">${routes.map((route) => `<span class="route">${escapeHTML(route)}</span>`).join("")}</div>` : ""}
-      ${renderQuota("转结", sub.forwardedUsed, sub.forwardedLimit, sub.forwardedPercent)}
-      ${renderQuota("当日", sub.dailyUsed, sub.dailyLimit, sub.dailyPercent)}
+      ${renderQuota("周额度", quota.weeklyUsed, quota.weeklyLimit, quota.weeklyPercent)}
+      ${renderQuota("月总额度", quota.monthlyUsed, quota.monthlyLimit, quota.monthlyPercent)}
     </section>
   `;
+}
+
+function subQuota(sub) {
+  const weeklyLimit = coalescedNumber(sub.weeklyLimit, sub.dailyLimit);
+  const weeklyUsed = coalescedNumber(sub.weeklyUsed, sub.dailyUsed);
+  const monthlyLimit = coalescedNumber(sub.monthlyLimit, weeklyLimit);
+  const monthlyUsed = coalescedNumber(sub.monthlyUsed, weeklyUsed);
+  return {
+    weeklyLimit,
+    weeklyUsed,
+    weeklyPercent: coalescedNumber(sub.weeklyPercent, weeklyLimit > 0 ? (weeklyUsed / weeklyLimit) * 100 : 0),
+    monthlyLimit,
+    monthlyUsed,
+    monthlyPercent: coalescedNumber(sub.monthlyPercent, monthlyLimit > 0 ? (monthlyUsed / monthlyLimit) * 100 : 0),
+  };
 }
 
 function renderQuota(label, used, limit, percent) {
@@ -250,6 +328,9 @@ function renderModal() {
   }
   if (state.modal === "settings") {
     return renderSettings();
+  }
+  if (state.modal === "about") {
+    return renderAbout();
   }
   return `<div class="modal" hidden></div>`;
 }
@@ -372,6 +453,7 @@ function renderLoginPrimaryButton(provider) {
 
 function renderSettings() {
   const cfg = state.config || {};
+  const showGlass = showGlassSetting();
   return `
     <div class="modal">
       <form class="dialog settings" data-form="settings">
@@ -384,7 +466,7 @@ function renderSettings() {
               <span class="field-suffix">秒刷新</span>
             </div>
             <label class="check"><input type="checkbox" name="onTop" ${cfg.onTop ? "checked" : ""} />窗口置顶</label>
-            <label class="check"><input type="checkbox" name="glassEnabled" ${cfg.glassEnabled ? "checked" : ""} />显示玻璃球</label>
+            ${showGlass ? `<label class="check"><input type="checkbox" name="glassEnabled" ${cfg.glassEnabled ? "checked" : ""} />显示玻璃球</label>` : ""}
             <label class="check"><input type="checkbox" name="remember" ${cfg.rememberLogin ? "checked" : ""} />记住登录状态</label>
             <div class="dialog-buttons">
               <button class="secondary" type="button" data-action="cancel-modal">取消</button>
@@ -395,6 +477,54 @@ function renderSettings() {
       </form>
     </div>
   `;
+}
+
+function renderAbout() {
+  return `
+    <div class="modal">
+      <section class="dialog about">
+        <div class="dialog-shell">
+          <div class="dots">${renderDialogDots(408, 500)}</div>
+          <div class="dialog-content">
+            <div class="about-hero">
+              <img class="about-avatar" src="assets/about-avatar.png" alt="晏琳" />
+              <div class="dialog-title">关于 QuotaBall</div>
+              <div class="subtitle">额度监控</div>
+            </div>
+            <div class="glass-line"></div>
+            <div class="about-card">
+              <div class="about-label">作者</div>
+              <div class="about-value">晏琳</div>
+            </div>
+            <div class="about-links">
+              <a class="about-link" href="https://github.com/Aichs/QuotaBall/tree/feature/newapi-integration" target="_blank" rel="noreferrer">
+                <span>GitHub</span>
+                <strong>QuotaBall</strong>
+              </a>
+              <a class="about-link" href="https://linux.do/u/aichs/summary" target="_blank" rel="noreferrer">
+                <span>LinuxDo</span>
+                <strong>aichs</strong>
+              </a>
+            </div>
+            <div class="about-community">
+              <span class="linuxdo-logo" aria-hidden="true">LD</span>
+              <div class="community-copy">
+                <div class="community-title">LinuxDo 社区</div>
+                <p>新的理想型社区，面向开发者与 AI 实践者，倡导真诚、友善、团结、专业的交流氛围。</p>
+              </div>
+            </div>
+            <div class="dialog-buttons">
+              <button class="primary" type="button" data-action="cancel-modal">关闭</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function showGlassSetting() {
+  return !isNewAPIProvider(state.snapshot);
 }
 
 function renderDialogDots(w, h) {
@@ -443,6 +573,10 @@ async function onAction(event) {
   if (action === "settings") {
     state.formError = "";
     state.modal = "settings";
+    render();
+  } else if (action === "about") {
+    state.formError = "";
+    state.modal = "about";
     render();
   } else if (action === "refresh") {
     await callRefresh();
@@ -709,7 +843,7 @@ async function onSettings(event) {
   const payload = {
     refreshSec,
     onTop: form.get("onTop") === "on",
-    glassEnabled: form.get("glassEnabled") === "on",
+    glassEnabled: showGlassSetting() ? form.get("glassEnabled") === "on" : Boolean(state.config.glassEnabled),
     rememberLogin: form.get("remember") === "on",
     provider: state.config.provider || "krill",
     newapiBaseUrl: state.config.newapiBaseUrl || "",

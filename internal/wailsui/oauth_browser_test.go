@@ -16,7 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"krill_monitor/internal/newapi"
+	"quotaball/internal/newapi"
 )
 
 func TestMain(m *testing.M) {

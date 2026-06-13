@@ -6,8 +6,9 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
+
+	"quotaball/internal/atomicfile"
 )
 
 const (
@@ -46,7 +47,7 @@ func Default() Config {
 		OnTop:         true,
 		Theme:         ThemeLight,
 		TbarEnabled:   true,
-		TbarMetric:    "daily",
+		TbarMetric:    "weekly",
 	}
 }
 
@@ -81,14 +82,11 @@ func Load(path string) (Config, error) {
 func Save(path string, cfg Config) error {
 	cfg.Normalize()
 	cfg.Password = ""
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o600)
+	return atomicfile.Write(path, raw, 0o600)
 }
 
 func (c *Config) Normalize() {
@@ -107,8 +105,10 @@ func (c *Config) Normalize() {
 	if c.Theme != ThemeDark {
 		c.Theme = ThemeLight
 	}
-	if c.TbarMetric != "forwarded" {
-		c.TbarMetric = "daily"
+	switch c.TbarMetric {
+	case "monthly":
+	default:
+		c.TbarMetric = "weekly"
 	}
 }
 
@@ -121,7 +121,8 @@ func normalizeBaseURL(raw string) string {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return strings.TrimRight(raw, "/")
 	}
-	u.Path = strings.TrimRight(u.EscapedPath(), "/")
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
 	u.RawQuery = ""
 	u.Fragment = ""
 	return strings.TrimRight(u.String(), "/")

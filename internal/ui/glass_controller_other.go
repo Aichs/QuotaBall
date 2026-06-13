@@ -5,8 +5,8 @@ package ui
 import (
 	"errors"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/krill"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
 )
 
 type GlassControllerOptions struct {

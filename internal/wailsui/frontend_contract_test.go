@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"krill_monitor/internal/krill"
+	"quotaball/internal/krill"
 )
 
 func TestFrontendHasLoggedOutRenderPathWithoutPanelShell(t *testing.T) {
@@ -47,6 +47,191 @@ func TestFrontendLoginSupportsProviderSelectionWithoutChangingKrillDefault(t *te
 	if !strings.Contains(js, `data-action="newapi-start-oauth"`) ||
 		!strings.Contains(js, `data-form="newapi-complete"`) {
 		t.Fatalf("NewAPI login must provide OAuth start and callback completion controls")
+	}
+}
+
+func TestFrontendKrillPanelUsesWeeklyAndMonthlyQuotaLabels(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	for _, want := range []string{"周额度", "月总额度"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("Krill quota panel must expose %q", want)
+		}
+	}
+	for _, removed := range []string{"转结", "当日", "日额度"} {
+		if strings.Contains(js, removed) {
+			t.Fatalf("Krill quota panel must not use old quota label %q", removed)
+		}
+	}
+	if !strings.Contains(js, "weeklyLimit") || !strings.Contains(js, "monthlyLimit") {
+		t.Fatalf("frontend must read explicit weekly and monthly quota fields")
+	}
+}
+
+func TestFrontendNewAPIPanelUsesBalanceSpendAndRequestCards(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	if !strings.Contains(js, "function isNewAPIProvider") {
+		t.Fatalf("frontend must detect NewAPI snapshots separately from Krill")
+	}
+	for _, want := range []string{"当前余额", "历史消耗", "请求次数"} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("NewAPI panel must expose %q", want)
+		}
+	}
+
+	start := strings.Index(js, "function newAPIStatCards")
+	if start < 0 {
+		t.Fatalf("frontend must keep NewAPI stat cards separate from Krill quota cards")
+	}
+	end := strings.Index(js[start:], "function krillStatCards")
+	if end < 0 {
+		t.Fatalf("newAPIStatCards test could not find function boundary")
+	}
+	newAPIStats := js[start : start+end]
+	for _, want := range []string{"snapshot.wallet", "snapshot.spend", "snapshot.req"} {
+		if !strings.Contains(newAPIStats, want) {
+			t.Fatalf("NewAPI stat cards must read %q", want)
+		}
+	}
+	for _, removed := range []string{"周额度", "月总额度", "本周剩余"} {
+		if strings.Contains(newAPIStats, removed) {
+			t.Fatalf("NewAPI stat cards must not expose Krill quota label %q", removed)
+		}
+	}
+}
+
+func TestFrontendNewAPISettingsHideGlassToggle(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	if !strings.Contains(js, "function showGlassSetting") ||
+		!strings.Contains(js, "!isNewAPIProvider(state.snapshot)") {
+		t.Fatalf("frontend settings must hide the glass toggle for NewAPI snapshots")
+	}
+	start := strings.Index(js, "async function onSettings")
+	if start < 0 {
+		t.Fatalf("frontend must define onSettings")
+	}
+	end := strings.Index(js[start:], "async function boot")
+	if end < 0 {
+		t.Fatalf("onSettings test could not find function boundary")
+	}
+	onSettings := js[start : start+end]
+	if !strings.Contains(onSettings, `glassEnabled: showGlassSetting() ? form.get("glassEnabled") === "on" : Boolean(state.config.glassEnabled)`) {
+		t.Fatalf("NewAPI settings save must preserve the existing glass preference instead of posting an unchecked hidden toggle")
+	}
+}
+
+func TestFrontendHeaderExposesAboutButtonNextToSettings(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	start := strings.Index(js, "function renderHeader")
+	if start < 0 {
+		t.Fatalf("frontend must define renderHeader")
+	}
+	end := strings.Index(js[start:], "function renderStats")
+	if end < 0 {
+		t.Fatalf("renderHeader test could not find function boundary")
+	}
+	header := js[start : start+end]
+	settingsIndex := strings.Index(header, `data-action="settings"`)
+	aboutIndex := strings.Index(header, `data-action="about"`)
+	if settingsIndex < 0 || aboutIndex < 0 {
+		t.Fatalf("header must expose settings and about icon buttons")
+	}
+	if aboutIndex < settingsIndex {
+		t.Fatalf("about button should be placed next to the settings button, after settings")
+	}
+	if !strings.Contains(header, `title="关于"`) {
+		t.Fatalf("about button must have an accessible title")
+	}
+}
+
+func TestFrontendAboutModalIncludesAuthorAndLinks(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	if !strings.Contains(js, `state.modal === "about"`) {
+		t.Fatalf("frontend modal router must support the about page")
+	}
+	start := strings.Index(js, "function renderAbout")
+	if start < 0 {
+		t.Fatalf("frontend must define renderAbout")
+	}
+	end := strings.Index(js[start:], "function showGlassSetting")
+	if end < 0 {
+		t.Fatalf("renderAbout test could not find function boundary")
+	}
+	about := js[start : start+end]
+	for _, want := range []string{
+		"作者",
+		`alt="晏琳"`,
+		`<div class="about-value">晏琳</div>`,
+		"assets/about-avatar.png",
+		"https://github.com/Aichs/QuotaBall/tree/feature/newapi-integration",
+		"https://linux.do/u/aichs/summary",
+		"LinuxDo 社区",
+		"新的理想型社区",
+		"真诚、友善、团结、专业",
+		`class="about-avatar"`,
+		`class="about-community"`,
+		`class="dialog about"`,
+		`target="_blank"`,
+		`rel="noreferrer"`,
+	} {
+		if !strings.Contains(about, want) {
+			t.Fatalf("about page must include %q", want)
+		}
+	}
+}
+
+func TestFrontendAboutAvatarAssetIsBundled(t *testing.T) {
+	info, err := os.Stat("frontend/src/assets/about-avatar.png")
+	if err != nil {
+		t.Fatalf("about page avatar asset must be bundled: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatalf("about page avatar asset must not be empty")
+	}
+}
+
+func TestFrontendAboutModalStylesAvatarAndCommunitySection(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(raw)
+
+	for _, want := range []string{
+		".about-avatar",
+		"border-radius: 50%",
+		"object-fit: cover",
+		".about-community",
+		".linuxdo-logo",
+		".community-copy",
+	} {
+		if !strings.Contains(css, want) {
+			t.Fatalf("about page styles must include %q", want)
+		}
 	}
 }
 
@@ -246,7 +431,7 @@ func TestBackendGlassSyncRequiresLoggedInSnapshot(t *testing.T) {
 	if start < 0 {
 		t.Fatalf("backend must define syncGlass")
 	}
-	end := strings.Index(goSrc[start:], "func (a *App) setRefreshing")
+	end := strings.Index(goSrc[start:], "func (a *App) beginRefreshOperation")
 	if end < 0 {
 		t.Fatalf("syncGlass test could not find function boundary")
 	}
@@ -254,8 +439,8 @@ func TestBackendGlassSyncRequiresLoggedInSnapshot(t *testing.T) {
 	if !strings.Contains(syncGlass, "snap.LoggedIn") {
 		t.Fatalf("glass ball visibility must depend on the snapshot logged-in state")
 	}
-	if !strings.Contains(syncGlass, "show := enabled && snap.LoggedIn") {
-		t.Fatalf("glass ball should only show when enabled and logged in")
+	if !strings.Contains(syncGlass, "show := snap.LoggedIn && (snap.Provider == config.ProviderNewAPI || enabled)") {
+		t.Fatalf("glass ball should always show for logged-in NewAPI and otherwise follow the glass setting")
 	}
 }
 
@@ -289,6 +474,13 @@ func TestBackendWindowSizeMatchesAuthState(t *testing.T) {
 	w, h = windowSizeForSnapshot(krill.Snapshot{LoggedIn: true})
 	if w != panelWidth || h != panelHeight {
 		t.Fatalf("logged-in window size = %dx%d, want %dx%d", w, h, panelWidth, panelHeight)
+	}
+}
+
+func TestSnapshotDTOIncludesProviderForFrontendBranching(t *testing.T) {
+	dto := snapshotDTO(krill.Snapshot{Provider: "newapi", LoggedIn: true, OK: true})
+	if dto.Provider != "newapi" {
+		t.Fatalf("SnapshotDTO.Provider = %q, want newapi", dto.Provider)
 	}
 }
 

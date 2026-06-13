@@ -17,12 +17,12 @@ import (
 	windowsOptions "github.com/wailsapp/wails/v2/pkg/options/windows"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/krill"
-	"krill_monitor/internal/newapi"
-	"krill_monitor/internal/paths"
-	"krill_monitor/internal/secret"
-	"krill_monitor/internal/ui"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
+	"quotaball/internal/newapi"
+	"quotaball/internal/paths"
+	"quotaball/internal/secret"
+	"quotaball/internal/ui"
 )
 
 const (
@@ -30,6 +30,7 @@ const (
 	panelHeight       = 820
 	loginWindowWidth  = 446
 	loginWindowHeight = 486
+	appWindowTitle    = "QuotaBall"
 )
 
 //go:embed all:frontend/src
@@ -43,12 +44,13 @@ type App struct {
 	svc    *krill.Service
 	newSvc *newapi.Service
 
-	mu         sync.Mutex
-	snap       krill.Snapshot
-	refreshing bool
-	visible    bool
-	quitting   bool
-	authGen    uint64
+	mu          sync.Mutex
+	snap        krill.Snapshot
+	operation   appOperation
+	operationID uint64
+	visible     bool
+	quitting    bool
+	authGen     uint64
 
 	stop     chan struct{}
 	commands chan appCommand
@@ -71,6 +73,23 @@ type appCommand struct {
 	reveal bool
 }
 
+type appOperation int
+
+const (
+	operationIdle appOperation = iota
+	operationRefreshing
+	operationLoggingIn
+	operationOAuthStarting
+	operationOAuthCompleting
+)
+
+type appOperationToken struct {
+	id appOperationID
+	op appOperation
+}
+
+type appOperationID uint64
+
 func Run() error {
 	app, err := NewApp()
 	if err != nil {
@@ -82,7 +101,7 @@ func Run() error {
 		return err
 	}
 	return wails.Run(&options.App{
-		Title:             "Krill AI 额度监控",
+		Title:             appWindowTitle,
 		Width:             windowWidth,
 		Height:            windowHeight,
 		MinWidth:          loginWindowWidth,
@@ -126,11 +145,7 @@ func NewApp() (*App, error) {
 		return nil, err
 	}
 	st := secret.NewStore(p.Secret)
-	if cfg.Password != "" {
-		_ = st.Set("password", cfg.Password)
-		cfg.Password = ""
-		_ = config.Save(p.Config, cfg)
-	}
+	cfg = migratePlaintextPassword(cfg, p.Config, st, config.Save)
 	app := &App{
 		paths:    p,
 		cfg:      cfg,
@@ -150,10 +165,30 @@ func NewApp() (*App, error) {
 	}
 	app.newSvc.Configure(app.cfg)
 	app.snap = krill.EmptySnapshot("正在检查登录状态...")
+	app.snap.Provider = normalizeProvider(cfg.Provider)
 	if !app.hasLoginState() {
 		app.snap = krill.EmptySnapshot(app.loginRequiredMessage())
+		app.snap.Provider = normalizeProvider(cfg.Provider)
 	}
 	return app, nil
+}
+
+type secretSetter interface {
+	Set(key, value string) error
+}
+
+type configSaver func(string, config.Config) error
+
+func migratePlaintextPassword(cfg config.Config, configPath string, secrets secretSetter, save configSaver) config.Config {
+	if cfg.Password == "" || secrets == nil || save == nil {
+		return cfg
+	}
+	if err := secrets.Set("password", cfg.Password); err != nil {
+		return cfg
+	}
+	cfg.Password = ""
+	_ = save(configPath, cfg)
+	return cfg
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -286,15 +321,11 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 		return SnapshotDTO{}, errors.New("请输入邮箱和密码")
 	}
 
-	a.mu.Lock()
-	if a.refreshing {
-		a.mu.Unlock()
-		return SnapshotDTO{}, errors.New("正在刷新，请稍后")
+	op, authGen, err := a.beginAuthOperation(operationLoggingIn)
+	if err != nil {
+		return SnapshotDTO{}, err
 	}
-	a.refreshing = true
-	authGen := a.authGen
-	a.mu.Unlock()
-	defer a.setRefreshing(false)
+	defer a.finishOperation(op)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -314,7 +345,7 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 	cfg := a.cfg
 	a.mu.Unlock()
 	a.svc.Configure(cfg)
-	err := config.Save(a.paths.Config, cfg)
+	err = config.Save(a.paths.Config, cfg)
 	if err != nil {
 		return SnapshotDTO{}, err
 	}
@@ -340,14 +371,11 @@ func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (dto NewAPIOAuthStar
 		return NewAPIOAuthStartDTO{}, errors.New("请输入 NewAPI 网站地址")
 	}
 
-	a.mu.Lock()
-	if a.refreshing {
-		a.mu.Unlock()
-		return NewAPIOAuthStartDTO{}, errors.New("正在刷新，请稍后")
+	op, _, err := a.beginAuthOperation(operationOAuthStarting)
+	if err != nil {
+		return NewAPIOAuthStartDTO{}, err
 	}
-	a.refreshing = true
-	a.mu.Unlock()
-	defer a.setRefreshing(false)
+	defer a.finishOperation(op)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -410,15 +438,11 @@ func (a *App) completeNewAPIOAuth(ctx context.Context, req NewAPIOAuthCompleteRe
 		return SnapshotDTO{}, errors.New("请粘贴登录完成后的回调 URL")
 	}
 
-	a.mu.Lock()
-	if a.refreshing {
-		a.mu.Unlock()
-		return SnapshotDTO{}, errors.New("正在刷新，请稍后")
+	op, authGen, err := a.beginAuthOperation(operationOAuthCompleting)
+	if err != nil {
+		return SnapshotDTO{}, err
 	}
-	a.refreshing = true
-	authGen := a.authGen
-	a.mu.Unlock()
-	defer a.setRefreshing(false)
+	defer a.finishOperation(op)
 
 	var snap krill.Snapshot
 	if accessToken != "" {
@@ -437,6 +461,7 @@ func (a *App) completeNewAPIOAuth(ctx context.Context, req NewAPIOAuthCompleteRe
 	if err != nil {
 		return SnapshotDTO{}, err
 	}
+	snap.Provider = config.ProviderNewAPI
 	if current, stale := a.snapshotIfAuthChanged(authGen); stale {
 		return snapshotDTO(current), krill.ErrAuthRequired
 	}
@@ -476,12 +501,14 @@ func (a *App) completeCapturedNewAPIOAuth(req NewAPIOAuthCompleteRequest) {
 
 func (a *App) Logout() (SnapshotDTO, error) {
 	a.stopOAuthCapture()
-	if a.activeProvider() == config.ProviderNewAPI {
+	provider := a.activeProvider()
+	if provider == config.ProviderNewAPI {
 		a.newSvc.Logout()
 	} else {
 		a.svc.Logout()
 	}
 	snap := krill.EmptySnapshot("已退出登录")
+	snap.Provider = provider
 	a.mu.Lock()
 	a.cfg.Password = ""
 	a.authGen++
@@ -612,29 +639,42 @@ func (a *App) Settings() (PublicConfigDTO, error) {
 
 func (a *App) SaveSettings(req SettingsRequest) (PublicConfigDTO, error) {
 	a.mu.Lock()
-	a.cfg.RefreshSec = clampInt(req.RefreshSec, 3, 3600)
-	a.cfg.OnTop = req.OnTop
-	a.cfg.TbarEnabled = req.GlassEnabled
-	a.cfg.RememberLogin = req.RememberLogin
+	cfg := a.cfg
+	oldProvider := a.cfg.Provider
+	oldNewAPIBaseURL := a.cfg.NewAPIBaseURL
+	oldRememberLogin := a.cfg.RememberLogin
+	cfg.RefreshSec = clampInt(req.RefreshSec, 3, 3600)
+	cfg.OnTop = req.OnTop
+	cfg.RememberLogin = req.RememberLogin
 	if provider := normalizeProvider(req.Provider); provider == config.ProviderKrill || provider == config.ProviderNewAPI {
-		a.cfg.Provider = provider
+		cfg.Provider = provider
+	}
+	if cfg.Provider != config.ProviderNewAPI {
+		cfg.TbarEnabled = req.GlassEnabled
 	}
 	if strings.TrimSpace(req.NewAPIBaseURL) != "" {
-		a.cfg.NewAPIBaseURL = strings.TrimRight(strings.TrimSpace(req.NewAPIBaseURL), "/")
+		cfg.NewAPIBaseURL = strings.TrimRight(strings.TrimSpace(req.NewAPIBaseURL), "/")
 	}
-	a.cfg.Password = ""
-	cfg := a.cfg
+	if cfg.Provider != oldProvider || cfg.NewAPIBaseURL != oldNewAPIBaseURL || cfg.RememberLogin != oldRememberLogin {
+		a.authGen++
+	}
 	ctx := a.ctx
+	a.mu.Unlock()
+
+	cfg.Password = ""
+	err := config.Save(a.paths.Config, cfg)
+	if err != nil {
+		return PublicConfigDTO{}, err
+	}
+	a.mu.Lock()
+	a.cfg = cfg
 	a.mu.Unlock()
 	a.svc.Configure(cfg)
 	a.newSvc.Configure(cfg)
 	if !cfg.RememberLogin {
-		a.svc.ClearSavedLogin()
-		a.newSvc.ClearSavedLogin()
-	}
-	err := config.Save(a.paths.Config, cfg)
-	if err != nil {
-		return PublicConfigDTO{}, err
+		if err := errors.Join(a.svc.ClearSavedLogin(), a.newSvc.ClearSavedLogin()); err != nil {
+			return PublicConfigDTO{}, err
+		}
 	}
 	if ctx != nil {
 		wailsruntime.WindowSetAlwaysOnTop(ctx, cfg.OnTop)
@@ -735,22 +775,18 @@ func (a *App) Quit() error {
 }
 
 func (a *App) refresh(reveal bool) (SnapshotDTO, error) {
-	a.mu.Lock()
-	if a.refreshing {
-		snap := a.snap
-		a.mu.Unlock()
+	op, snap, authGen, ok := a.beginRefreshOperation()
+	if !ok {
 		return snapshotDTO(snap), nil
 	}
-	a.refreshing = true
-	authGen := a.authGen
-	a.mu.Unlock()
-	defer a.setRefreshing(false)
+	defer a.finishOperation(op)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	snap, err := a.fetch(ctx)
 	if err != nil && (errors.Is(err, krill.ErrAuthRequired) || errors.Is(err, newapi.ErrAuthRequired)) {
 		snap = krill.EmptySnapshot(a.loginRequiredMessage())
+		snap.Provider = a.activeProvider()
 	}
 	if current, stale := a.snapshotIfAuthChanged(authGen); stale {
 		return snapshotDTO(current), nil
@@ -771,10 +807,14 @@ func (a *App) snapshotIfAuthChanged(gen uint64) (krill.Snapshot, bool) {
 func (a *App) fetch(ctx context.Context) (krill.Snapshot, error) {
 	var snap krill.Snapshot
 	var err error
-	if a.activeProvider() == config.ProviderNewAPI {
+	provider := a.activeProvider()
+	if provider == config.ProviderNewAPI {
 		snap, err = a.newSvc.Fetch(ctx)
 	} else {
 		snap, err = a.svc.Fetch(ctx)
+	}
+	if snap.Provider == "" {
+		snap.Provider = provider
 	}
 	if snap.Email == "" {
 		a.mu.Lock()
@@ -1041,7 +1081,7 @@ func (a *App) syncGlass(snap krill.Snapshot) {
 		}
 		return
 	}
-	show := enabled && snap.LoggedIn
+	show := snap.LoggedIn && (snap.Provider == config.ProviderNewAPI || enabled)
 	if show && glass == nil {
 		_ = a.ensureGlassController()
 		a.mu.Lock()
@@ -1059,10 +1099,48 @@ func (a *App) syncGlass(snap krill.Snapshot) {
 	}
 }
 
-func (a *App) setRefreshing(v bool) {
+func (a *App) beginRefreshOperation() (appOperationToken, krill.Snapshot, uint64, bool) {
 	a.mu.Lock()
-	a.refreshing = v
+	defer a.mu.Unlock()
+	if a.operation != operationIdle {
+		return appOperationToken{}, a.snap, a.authGen, false
+	}
+	a.operationID++
+	a.operation = operationRefreshing
+	token := appOperationToken{id: appOperationID(a.operationID), op: operationRefreshing}
+	return token, a.snap, a.authGen, true
+}
+
+func (a *App) beginAuthOperation(op appOperation) (appOperationToken, uint64, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.operation != operationIdle && a.operation != operationRefreshing {
+		return appOperationToken{}, 0, errors.New(a.operation.busyMessage())
+	}
+	a.operationID++
+	a.operation = op
+	a.authGen++
+	token := appOperationToken{id: appOperationID(a.operationID), op: op}
+	return token, a.authGen, nil
+}
+
+func (a *App) finishOperation(token appOperationToken) {
+	a.mu.Lock()
+	if appOperationID(a.operationID) == token.id && a.operation == token.op {
+		a.operation = operationIdle
+	}
 	a.mu.Unlock()
+}
+
+func (op appOperation) busyMessage() string {
+	switch op {
+	case operationLoggingIn, operationOAuthStarting, operationOAuthCompleting:
+		return "正在登录，请稍后"
+	case operationRefreshing:
+		return "正在刷新，请稍后"
+	default:
+		return "操作进行中，请稍后"
+	}
 }
 
 func (a *App) isQuitting() bool {

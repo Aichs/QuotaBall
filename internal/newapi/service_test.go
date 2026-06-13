@@ -3,15 +3,47 @@ package newapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/secret"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
+	"quotaball/internal/secret"
 )
+
+const asyncTestTimeout = 5 * time.Second
+
+type serviceResult struct {
+	snap krill.Snapshot
+	err  error
+}
+
+func waitForSignal(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(asyncTestTimeout):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func waitForServiceResult(t *testing.T, ch <-chan serviceResult, name string) serviceResult {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(asyncTestTimeout):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+	return serviceResult{}
+}
 
 func TestServiceConfigureClearsMemoryTokenWhenBaseURLChanges(t *testing.T) {
 	svc := &Service{}
@@ -37,6 +69,64 @@ func TestServiceConfigureClearsMemoryTokenWhenBaseURLChanges(t *testing.T) {
 	defer svc.mu.Unlock()
 	if svc.memToken != "" || svc.email != "" || svc.pending != nil {
 		t.Fatalf("Configure must clear in-memory auth when base URL changes, token=%q email=%q pending=%v", svc.memToken, svc.email, svc.pending != nil)
+	}
+}
+
+func TestServiceConfigureWaitsForAuthPersistenceBoundary(t *testing.T) {
+	const baseA = "https://a.example"
+	const baseB = "https://b.example"
+
+	svc := &Service{}
+	svc.Configure(config.Config{
+		Provider:      config.ProviderNewAPI,
+		NewAPIBaseURL: baseA,
+		RememberLogin: true,
+	})
+	svc.mu.Lock()
+	initialGen := svc.authGen
+	svc.mu.Unlock()
+
+	svc.persistMu.Lock()
+	var unlockOnce sync.Once
+	unlock := func() {
+		unlockOnce.Do(func() { svc.persistMu.Unlock() })
+	}
+	t.Cleanup(unlock)
+
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		svc.Configure(config.Config{
+			Provider:      config.ProviderNewAPI,
+			NewAPIBaseURL: baseB,
+			RememberLogin: true,
+		})
+		close(done)
+	}()
+
+	waitForSignal(t, started, "Configure goroutine start")
+	select {
+	case <-done:
+		t.Fatal("Configure completed while auth persistence boundary was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	svc.mu.Lock()
+	blockedBase := svc.baseURL
+	blockedGen := svc.authGen
+	svc.mu.Unlock()
+	if blockedBase != baseA || blockedGen != initialGen {
+		t.Fatalf("Configure mutated auth state while persistence boundary was held, base=%q gen=%d", blockedBase, blockedGen)
+	}
+
+	unlock()
+	waitForSignal(t, done, "Configure completion")
+
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	if svc.baseURL != baseB || svc.authGen != initialGen+1 {
+		t.Fatalf("Configure did not apply after boundary release, base=%q gen=%d", svc.baseURL, svc.authGen)
 	}
 }
 
@@ -85,10 +175,11 @@ func TestServiceCompleteLinuxDoUsesSessionOnlyLoginForFetch(t *testing.T) {
 			}
 			sawUserSelf = true
 			writeServiceAPI(t, w, map[string]any{"success": true, "data": map[string]any{
-				"id":         42,
-				"username":   "linuxdo_user",
-				"quota":      900000,
-				"used_quota": 100000,
+				"id":            42,
+				"username":      "linuxdo_user",
+				"quota":         900000,
+				"used_quota":    100000,
+				"request_count": 618,
 			}})
 		default:
 			http.NotFound(w, r)
@@ -112,6 +203,9 @@ func TestServiceCompleteLinuxDoUsesSessionOnlyLoginForFetch(t *testing.T) {
 	if !snap.LoggedIn || snap.Email != "linuxdo_user" || !sawUserSelf {
 		t.Fatalf("snapshot=%#v sawUserSelf=%v", snap, sawUserSelf)
 	}
+	if snap.Req != "618" {
+		t.Fatalf("Req = %q, want 618", snap.Req)
+	}
 
 	sawUserSelf = false
 	snap, err = svc.Fetch(context.Background())
@@ -120,6 +214,9 @@ func TestServiceCompleteLinuxDoUsesSessionOnlyLoginForFetch(t *testing.T) {
 	}
 	if !snap.LoggedIn || !sawUserSelf {
 		t.Fatalf("Fetch should keep using session login, snapshot=%#v sawUserSelf=%v", snap, sawUserSelf)
+	}
+	if snap.Req != "618" {
+		t.Fatalf("Fetch Req = %q, want 618", snap.Req)
 	}
 }
 
@@ -195,6 +292,227 @@ func TestServicePersistsSessionOnlyLoginWhenRemembered(t *testing.T) {
 	}
 	if !snap.LoggedIn || snap.Email != "linuxdo_user" {
 		t.Fatalf("snapshot=%#v", snap)
+	}
+}
+
+func TestServiceSaveAuthPersistsTokenAuthAndClearsSession(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("DPAPI-backed secret writes are Windows-only")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer server.Close()
+	store := secret.NewStore(filepath.Join(t.TempDir(), "secrets.json"))
+	if err := store.Set(sessionKey(server.URL), `[{"name":"session","value":"stale-session"}]`); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &Service{Secrets: store}
+	if err := svc.saveAuth(server.URL, "new-token", nil, "user@example.com", "42"); err != nil {
+		t.Fatal(err)
+	}
+
+	token, err := store.Get(tokenKey(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "new-token" {
+		t.Fatalf("token = %q", token)
+	}
+	session, err := store.Get(sessionKey(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session != "" {
+		t.Fatalf("session = %q, want cleared", session)
+	}
+	email, err := store.Get(emailKey(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if email != "user@example.com" {
+		t.Fatalf("email = %q", email)
+	}
+	userID, err := store.Get(userIDKey(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userID != "42" {
+		t.Fatalf("userID = %q", userID)
+	}
+}
+
+func TestServiceSaveAuthPersistsSessionAuthAndClearsToken(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("DPAPI-backed secret writes are Windows-only")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer server.Close()
+	store := secret.NewStore(filepath.Join(t.TempDir(), "secrets.json"))
+	if err := store.Set(tokenKey(server.URL), "stale-token"); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ImportSessionCookies(`[{"name":"session","value":"fresh-session"}]`); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &Service{Secrets: store}
+	if err := svc.saveAuth(server.URL, "", client, "user@example.com", "42"); err != nil {
+		t.Fatal(err)
+	}
+
+	token, err := store.Get(tokenKey(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		t.Fatalf("token = %q, want cleared", token)
+	}
+	session, err := store.Get(sessionKey(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(session, "fresh-session") {
+		t.Fatalf("session = %q, want fresh session", session)
+	}
+	email, err := store.Get(emailKey(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if email != "user@example.com" {
+		t.Fatalf("email = %q", email)
+	}
+	userID, err := store.Get(userIDKey(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userID != "42" {
+		t.Fatalf("userID = %q", userID)
+	}
+}
+
+func TestServiceFetchResultIsIgnoredAfterLogout(t *testing.T) {
+	userSelfStarted := make(chan struct{})
+	releaseUserSelf := make(chan struct{})
+	var once sync.Once
+	var releaseOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/status":
+			writeServiceAPI(t, w, map[string]any{"success": true, "data": map[string]any{
+				"system_name":        "Test NewAPI",
+				"quota_per_unit":     500000,
+				"quota_display_type": "USD",
+			}})
+		case "/api/user/self":
+			once.Do(func() { close(userSelfStarted) })
+			<-releaseUserSelf
+			writeServiceAPI(t, w, map[string]any{"success": true, "data": map[string]any{
+				"id":         42,
+				"username":   "linuxdo_user",
+				"quota":      900000,
+				"used_quota": 100000,
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer releaseOnce.Do(func() { close(releaseUserSelf) })
+
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.UserID = "42"
+	svc := &Service{}
+	svc.Configure(config.Config{
+		Provider:      config.ProviderNewAPI,
+		NewAPIBaseURL: server.URL,
+		RememberLogin: false,
+	})
+	svc.mu.Lock()
+	svc.sessionClient = client
+	svc.userID = "42"
+	svc.mu.Unlock()
+
+	done := make(chan serviceResult, 1)
+	go func() {
+		snap, err := svc.Fetch(context.Background())
+		done <- serviceResult{snap: snap, err: err}
+	}()
+
+	waitForSignal(t, userSelfStarted, "/api/user/self request")
+	svc.Logout()
+	releaseOnce.Do(func() { close(releaseUserSelf) })
+
+	got := waitForServiceResult(t, done, "Fetch result")
+	if !errors.Is(got.err, ErrAuthRequired) {
+		t.Fatalf("Fetch error = %v, want ErrAuthRequired", got.err)
+	}
+	if got.snap.LoggedIn {
+		t.Fatalf("stale Fetch returned logged-in snapshot: %#v", got.snap)
+	}
+	if svc.HasLoginState() {
+		t.Fatal("stale Fetch restored NewAPI login state")
+	}
+}
+
+func TestServiceCompleteBrowserSessionResultIsIgnoredAfterLogout(t *testing.T) {
+	userSelfStarted := make(chan struct{})
+	releaseUserSelf := make(chan struct{})
+	var once sync.Once
+	var releaseOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/status":
+			writeServiceAPI(t, w, map[string]any{"success": true, "data": map[string]any{
+				"system_name":        "Test NewAPI",
+				"quota_per_unit":     500000,
+				"quota_display_type": "USD",
+			}})
+		case "/api/user/self":
+			once.Do(func() { close(userSelfStarted) })
+			<-releaseUserSelf
+			writeServiceAPI(t, w, map[string]any{"success": true, "data": map[string]any{
+				"id":         42,
+				"username":   "linuxdo_user",
+				"quota":      900000,
+				"used_quota": 100000,
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer releaseOnce.Do(func() { close(releaseUserSelf) })
+
+	svc := &Service{}
+	cookies := `[{"name":"session","value":"browser-session"}]`
+	done := make(chan serviceResult, 1)
+	go func() {
+		snap, err := svc.CompleteBrowserSession(context.Background(), server.URL, cookies, "42", false)
+		done <- serviceResult{snap: snap, err: err}
+	}()
+
+	waitForSignal(t, userSelfStarted, "/api/user/self request")
+	svc.Logout()
+	releaseOnce.Do(func() { close(releaseUserSelf) })
+
+	got := waitForServiceResult(t, done, "CompleteBrowserSession result")
+	if !errors.Is(got.err, ErrAuthRequired) {
+		t.Fatalf("CompleteBrowserSession error = %v, want ErrAuthRequired", got.err)
+	}
+	if got.snap.LoggedIn {
+		t.Fatalf("stale CompleteBrowserSession returned logged-in snapshot: %#v", got.snap)
+	}
+	if svc.HasLoginState() {
+		t.Fatal("stale CompleteBrowserSession restored NewAPI login state")
 	}
 }
 

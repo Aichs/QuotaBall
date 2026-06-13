@@ -264,12 +264,16 @@ func TestOAuthLogoutCanResetSessionBeforeState(t *testing.T) {
 
 func TestUserSelfMapsQuotaSnapshot(t *testing.T) {
 	now := time.Date(2026, 6, 11, 10, 30, 0, 0, time.UTC)
-	user := UserSelf{
-		ID:        42,
-		Username:  "mint",
-		Email:     "mint@example.com",
-		Quota:     900000,
-		UsedQuota: 100000,
+	var user UserSelf
+	if err := json.Unmarshal([]byte(`{
+		"id": 42,
+		"username": "mint",
+		"email": "mint@example.com",
+		"quota": 900000,
+		"used_quota": 100000,
+		"request_count": 618
+	}`), &user); err != nil {
+		t.Fatal(err)
 	}
 	status := Status{
 		SystemName:       "薄荷 API",
@@ -285,8 +289,14 @@ func TestUserSelfMapsQuotaSnapshot(t *testing.T) {
 	if snap.Email != "mint@example.com" {
 		t.Fatalf("Email = %q", snap.Email)
 	}
+	if snap.Provider != "newapi" {
+		t.Fatalf("Provider = %q, want newapi", snap.Provider)
+	}
 	if snap.Spend != 0.2 || snap.Wallet != 1.8 {
 		t.Fatalf("Spend/Wallet = %v/%v, want 0.2/1.8", snap.Spend, snap.Wallet)
+	}
+	if snap.Req != "618" {
+		t.Fatalf("Req = %q, want 618", snap.Req)
 	}
 	if len(snap.Subscriptions) != 1 {
 		t.Fatalf("subscriptions = %d, want 1", len(snap.Subscriptions))
@@ -294,6 +304,26 @@ func TestUserSelfMapsQuotaSnapshot(t *testing.T) {
 	sub := snap.Subscriptions[0]
 	if sub.Name != "薄荷 API 账户额度" || sub.DailyLimit != 2 || sub.DailyUsed != 0.2 || sub.DailyRemaining != 1.8 {
 		t.Fatalf("subscription = %#v", sub)
+	}
+}
+
+func TestUserSelfMapsZeroRequestCountSnapshot(t *testing.T) {
+	now := time.Date(2026, 6, 11, 10, 30, 0, 0, time.UTC)
+	var user UserSelf
+	if err := json.Unmarshal([]byte(`{
+		"id": 42,
+		"username": "mint",
+		"quota": 900000,
+		"used_quota": 100000,
+		"request_count": 0
+	}`), &user); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := user.ToSnapshot(Status{QuotaPerUnit: 500000}, now)
+
+	if snap.Req != "0" {
+		t.Fatalf("Req = %q, want 0 for explicit zero request_count", snap.Req)
 	}
 }
 
@@ -312,6 +342,9 @@ func TestTokenUsageMapsQuotaSnapshot(t *testing.T) {
 
 	snap := usage.ToSnapshot(status, "user@example.com", now)
 
+	if snap.Provider != "newapi" {
+		t.Fatalf("Provider = %q, want newapi", snap.Provider)
+	}
 	if snap.Spend != 0.02469 {
 		t.Fatalf("Spend = %v, want 0.02469", snap.Spend)
 	}

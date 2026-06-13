@@ -12,7 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"krill_monitor/internal/newapi"
+	"quotaball/internal/newapi"
 )
 
 func TestLiveNewAPILinuxDoOAuthCapture(t *testing.T) {

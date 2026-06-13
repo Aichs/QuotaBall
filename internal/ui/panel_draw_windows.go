@@ -12,7 +12,7 @@ import (
 	"github.com/lxn/walk"
 	"github.com/lxn/win"
 
-	"krill_monitor/internal/krill"
+	"quotaball/internal/krill"
 )
 
 const (
@@ -268,7 +268,7 @@ func (a *app) drawPanelText(canvas *walk.Canvas, s krill.Snapshot, layout panelL
 	}
 
 	draw("◒", fonts.logo, walk.RGB(8, 191, 215), walk.Rectangle{X: 22, Y: 17, Width: 32, Height: 32}, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
-	draw("Krill", fonts.title, walk.RGB(7, 29, 45), walk.Rectangle{X: 60, Y: 14, Width: 105, Height: 26}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
+	draw("QuotaBall", fonts.title, walk.RGB(7, 29, 45), walk.Rectangle{X: 60, Y: 14, Width: 140, Height: 26}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
 	draw("额度监控", fonts.subtitle, walk.RGB(58, 96, 112), walk.Rectangle{X: 61, Y: 39, Width: 90, Height: 20}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
 	draw(formatTime(s.Time), fonts.muted, walk.RGB(73, 110, 124), walk.Rectangle{X: 156, Y: 27, Width: 70, Height: 18}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
 
@@ -293,20 +293,11 @@ func (a *app) drawPanelText(canvas *walk.Canvas, s krill.Snapshot, layout panelL
 		draw(s.Err, fonts.err, walk.RGB(217, 72, 72), insetRect(layout.errRect, 8, 5), walk.TextLeft|walk.TextVCenter|walk.TextWordbreak)
 	}
 
-	tq := s.Summary.TotalDailyQuotaUSD
-	fr := s.Summary.TotalForwardedRemainingUSD
-	values := []struct {
-		title  string
-		value  string
-		sub    string
-		accent walk.Color
-	}{
-		{"今日花费", money(s.Spend, 2), fmt.Sprintf("转结 %s · 剩余 %s", money(fr, 2), money(math.Max(0, tq-s.Spend), 2)), walk.RGB(255, 173, 47)},
-		{"钱包余额", money(s.Wallet, 2), walletSubText(s.Wallet), walk.RGB(40, 184, 255)},
-		{"日额度", money(tq, 0), fmt.Sprintf("已用 %s / 总计 %s", money(s.Spend, 2), money(tq, 0)), walk.RGB(49, 223, 154)},
-		{"缓存率", nonEmpty(s.Cache, "-"), "缓存命中 / 请求数", walk.RGB(155, 124, 255)},
-	}
+	values := panelStatCards(s)
 	for i, item := range values {
+		if i >= len(layout.cards) {
+			break
+		}
 		r := layout.cards[i]
 		draw(item.title, fonts.cardTitle, walk.RGB(52, 89, 105), walk.Rectangle{X: r.X + 12, Y: r.Y + 9, Width: r.Width - 24, Height: 18}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
 		draw(item.value, fonts.cardValue, item.accent, walk.Rectangle{X: r.X + 12, Y: r.Y + 29, Width: r.Width - 24, Height: 30}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine)
@@ -350,8 +341,8 @@ func drawSubscriptionText(canvas *walk.Canvas, fonts *panelFonts, item panelSubL
 		}
 		y += 25
 	}
-	drawQuotaText(canvas, fonts, r.X+12, y, r.Width-24, "转结", sub.ForwardedUsed, sub.ForwardedLimit, clip)
-	drawQuotaText(canvas, fonts, r.X+12, y+38, r.Width-24, "当日", sub.DailyUsed, sub.DailyLimit, clip)
+	drawQuotaText(canvas, fonts, r.X+12, y, r.Width-24, "周额度", firstPositive(sub.WeeklyUsed, sub.DailyUsed), firstPositive(sub.WeeklyLimit, sub.DailyLimit), clip)
+	drawQuotaText(canvas, fonts, r.X+12, y+38, r.Width-24, "月总额度", firstPositive(sub.MonthlyUsed, sub.WeeklyUsed, sub.DailyUsed), firstPositive(sub.MonthlyLimit, sub.WeeklyLimit, sub.DailyLimit), clip)
 }
 
 func drawQuotaText(canvas *walk.Canvas, fonts *panelFonts, x, y, w int, title string, used, limit float64, clip walk.Rectangle) {
@@ -558,8 +549,8 @@ func panelDrawQuotaBars(img *image.RGBA, r walk.Rectangle, sub krill.Subscriptio
 	if len(sub.Routes) > 0 {
 		y += 25
 	}
-	panelQuotaBar(img, r.X+12, y+20, r.Width-24, sub.ForwardedPercent, clip)
-	panelQuotaBar(img, r.X+12, y+58, r.Width-24, sub.DailyPercent, clip)
+	panelQuotaBar(img, r.X+12, y+20, r.Width-24, firstPositive(sub.WeeklyPercent, sub.DailyPercent), clip)
+	panelQuotaBar(img, r.X+12, y+58, r.Width-24, sub.MonthlyPercent, clip)
 }
 
 func panelQuotaBar(img *image.RGBA, x, y, w int, pct float64, clip walk.Rectangle) {
@@ -655,13 +646,6 @@ func containsPoint(r walk.Rectangle, x, y int) bool {
 
 func insetRect(r walk.Rectangle, x, y int) walk.Rectangle {
 	return walk.Rectangle{X: r.X + x, Y: r.Y + y, Width: r.Width - x*2, Height: r.Height - y*2}
-}
-
-func walletSubText(wallet float64) string {
-	if wallet == 0 {
-		return "额度用完自动消耗"
-	}
-	return "信用 + 福利"
 }
 
 func nonEmpty(v, fallback string) string {

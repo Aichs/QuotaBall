@@ -16,7 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"krill_monitor/internal/krill"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
 )
 
 const (
@@ -60,7 +61,7 @@ type UserSelf struct {
 	Email        string  `json:"email"`
 	Quota        float64 `json:"quota"`
 	UsedQuota    float64 `json:"used_quota"`
-	RequestCount int     `json:"request_count"`
+	RequestCount *int    `json:"request_count"`
 }
 
 type TokenUsage struct {
@@ -375,10 +376,11 @@ func (u UserSelf) ToSnapshot(status Status, now time.Time) krill.Snapshot {
 		DailyPercent:   percent(used, total),
 	}
 	return krill.Snapshot{
-		Spend:  used,
-		Wallet: remaining,
-		Req:    requestCountText(u.RequestCount),
-		Cache:  "-",
+		Spend:    used,
+		Wallet:   remaining,
+		Req:      requestCountText(u.RequestCount),
+		Cache:    "-",
+		Provider: config.ProviderNewAPI,
 		Summary: krill.Summary{
 			TotalUsedUSD:           used,
 			TotalDailyQuotaUSD:     total,
@@ -416,10 +418,11 @@ func (u TokenUsage) ToSnapshot(status Status, email string, now time.Time) krill
 		DailyPercent:   percent(used, total),
 	}
 	return krill.Snapshot{
-		Spend:  used,
-		Wallet: remaining,
-		Req:    "-",
-		Cache:  "-",
+		Spend:    used,
+		Wallet:   remaining,
+		Req:      "-",
+		Cache:    "-",
+		Provider: config.ProviderNewAPI,
 		Summary: krill.Summary{
 			TotalUsedUSD:           used,
 			TotalDailyQuotaUSD:     total,
@@ -438,11 +441,14 @@ func quotaToDisplay(value float64, status Status) float64 {
 	return value / status.unit()
 }
 
-func requestCountText(count int) string {
-	if count <= 0 {
+func requestCountText(count *int) string {
+	if count == nil {
 		return "-"
 	}
-	return strconv.Itoa(count)
+	if *count < 0 {
+		return "0"
+	}
+	return strconv.Itoa(*count)
 }
 
 func percent(used, limit float64) float64 {

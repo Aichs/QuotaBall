@@ -1,4 +1,4 @@
-module krill_monitor
+module quotaball
 
 go 1.25.8
 

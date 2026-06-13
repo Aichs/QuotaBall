@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/krill"
-	"krill_monitor/internal/secret"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
+	"quotaball/internal/secret"
 )
 
 type Service struct {
@@ -20,6 +20,7 @@ type Service struct {
 	Secrets *secret.Store
 
 	mu            sync.Mutex
+	persistMu     sync.Mutex
 	baseURL       string
 	rememberLogin bool
 	memToken      string
@@ -27,6 +28,7 @@ type Service struct {
 	email         string
 	userID        string
 	pending       *pendingOAuth
+	authGen       uint64
 }
 
 type OAuthStart struct {
@@ -45,8 +47,12 @@ type pendingOAuth struct {
 func (s *Service) Configure(cfg config.Config) {
 	cfg.Normalize()
 	base := strings.TrimSpace(cfg.NewAPIBaseURL)
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
 	s.mu.Lock()
 	if s.baseURL != base {
+		s.authGen++
 		s.memToken = ""
 		s.sessionClient = nil
 		s.email = ""
@@ -80,6 +86,7 @@ func (s *Service) StartLinuxDo(ctx context.Context, baseURL string, remember boo
 	if err != nil {
 		return OAuthStart{}, err
 	}
+	authGen := s.authGeneration()
 	client, err := NewClient(base, nil)
 	if err != nil {
 		return OAuthStart{}, err
@@ -97,7 +104,15 @@ func (s *Service) StartLinuxDo(ctx context.Context, baseURL string, remember boo
 		return OAuthStart{}, err
 	}
 
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
 	s.mu.Lock()
+	if s.authGen != authGen {
+		s.mu.Unlock()
+		return OAuthStart{}, ErrAuthRequired
+	}
+	s.authGen++
 	if s.baseURL != base {
 		s.memToken = ""
 		s.sessionClient = nil
@@ -126,6 +141,7 @@ func (s *Service) StartLinuxDoBrowser(ctx context.Context, baseURL string, remem
 	if err != nil {
 		return OAuthStart{}, err
 	}
+	authGen := s.authGeneration()
 	client, err := NewClient(base, nil)
 	if err != nil {
 		return OAuthStart{}, err
@@ -139,7 +155,15 @@ func (s *Service) StartLinuxDoBrowser(ctx context.Context, baseURL string, remem
 		return OAuthStart{}, errors.New("该 NewAPI 站点未启用 LinuxDo 登录")
 	}
 
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
 	s.mu.Lock()
+	if s.authGen != authGen {
+		s.mu.Unlock()
+		return OAuthStart{}, ErrAuthRequired
+	}
+	s.authGen++
 	if s.baseURL != base {
 		s.memToken = ""
 		s.sessionClient = nil
@@ -168,6 +192,7 @@ func (s *Service) CompleteLinuxDo(ctx context.Context, baseURL, callbackURL stri
 	}
 
 	s.mu.Lock()
+	authGen := s.authGen
 	pending := s.pending
 	if pending == nil || pending.baseURL != base {
 		s.mu.Unlock()
@@ -192,25 +217,8 @@ func (s *Service) CompleteLinuxDo(ctx context.Context, baseURL, callbackURL stri
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
 	}
-	s.mu.Lock()
-	s.baseURL = base
-	s.rememberLogin = remember
-	s.memToken = user.Token
-	if user.Token == "" {
-		s.sessionClient = pending.client
-	} else {
-		s.sessionClient = nil
-	}
-	s.email = email
-	s.userID = userID
-	s.pending = nil
-	s.mu.Unlock()
-	if remember && s.Secrets != nil {
-		if err := s.saveAuth(base, user.Token, pending.client, email, userID); err != nil {
-			return krill.EmptySnapshot(err.Error()), err
-		}
-	} else {
-		s.clearSaved(base)
+	if err := s.commitAuthIfCurrent(authGen, base, remember, user.Token, pending.client, email, userID); err != nil {
+		return krill.EmptySnapshot(err.Error()), err
 	}
 	return snap, nil
 }
@@ -224,6 +232,7 @@ func (s *Service) CompleteBrowserSession(ctx context.Context, baseURL, sessionCo
 		err := errors.New("NewAPI 自动登录未返回 session")
 		return krill.EmptySnapshot(err.Error()), err
 	}
+	authGen := s.authGeneration()
 	userID = cleanUserID(userID)
 	if userID == "" {
 		err := errors.New("NewAPI 自动登录未返回用户 ID")
@@ -245,21 +254,8 @@ func (s *Service) CompleteBrowserSession(ctx context.Context, baseURL, sessionCo
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
 	}
-	s.mu.Lock()
-	s.baseURL = base
-	s.rememberLogin = remember
-	s.memToken = ""
-	s.sessionClient = client
-	s.email = snap.Email
-	s.userID = userID
-	s.pending = nil
-	s.mu.Unlock()
-	if remember && s.Secrets != nil {
-		if err := s.saveAuth(base, "", client, snap.Email, userID); err != nil {
-			return krill.EmptySnapshot(err.Error()), err
-		}
-	} else {
-		s.clearSaved(base)
+	if err := s.commitAuthIfCurrent(authGen, base, remember, "", client, snap.Email, userID); err != nil {
+		return krill.EmptySnapshot(err.Error()), err
 	}
 	return snap, nil
 }
@@ -274,6 +270,7 @@ func (s *Service) CompleteBrowserToken(ctx context.Context, baseURL, token, user
 		err := errors.New("NewAPI 自动登录未返回 token")
 		return krill.EmptySnapshot(err.Error()), err
 	}
+	authGen := s.authGeneration()
 	userID = cleanUserID(userID)
 	if userID == "" {
 		err := errors.New("NewAPI 自动登录未返回用户 ID")
@@ -292,21 +289,8 @@ func (s *Service) CompleteBrowserToken(ctx context.Context, baseURL, token, user
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
 	}
-	s.mu.Lock()
-	s.baseURL = base
-	s.rememberLogin = remember
-	s.memToken = token
-	s.sessionClient = nil
-	s.email = snap.Email
-	s.userID = userID
-	s.pending = nil
-	s.mu.Unlock()
-	if remember && s.Secrets != nil {
-		if err := s.saveAuth(base, token, nil, snap.Email, userID); err != nil {
-			return krill.EmptySnapshot(err.Error()), err
-		}
-	} else {
-		s.clearSaved(base)
+	if err := s.commitAuthIfCurrent(authGen, base, remember, token, nil, snap.Email, userID); err != nil {
+		return krill.EmptySnapshot(err.Error()), err
 	}
 	return snap, nil
 }
@@ -324,6 +308,7 @@ func (s *Service) CompleteLinuxDoWithCookies(ctx context.Context, baseURL, callb
 		err := errors.New("NewAPI 自动登录未返回 state cookie")
 		return krill.EmptySnapshot(err.Error()), err
 	}
+	authGen := s.authGeneration()
 	client, err := NewClient(base, nil)
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
@@ -346,36 +331,19 @@ func (s *Service) CompleteLinuxDoWithCookies(ctx context.Context, baseURL, callb
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
 	}
-	s.mu.Lock()
-	s.baseURL = base
-	s.rememberLogin = remember
-	s.memToken = user.Token
-	if user.Token == "" {
-		s.sessionClient = client
-	} else {
-		s.sessionClient = nil
-	}
-	s.email = snap.Email
-	s.userID = userID
-	s.pending = nil
-	s.mu.Unlock()
-	if remember && s.Secrets != nil {
-		if err := s.saveAuth(base, user.Token, client, snap.Email, userID); err != nil {
-			return krill.EmptySnapshot(err.Error()), err
-		}
-	} else {
-		s.clearSaved(base)
+	if err := s.commitAuthIfCurrent(authGen, base, remember, user.Token, client, snap.Email, userID); err != nil {
+		return krill.EmptySnapshot(err.Error()), err
 	}
 	return snap, nil
 }
 
 func (s *Service) Fetch(ctx context.Context) (krill.Snapshot, error) {
-	base := s.currentBaseURL()
+	base, authGen := s.currentBaseURLAndGeneration()
 	if base == "" {
 		return krill.EmptySnapshot(ErrAuthRequired.Error()), ErrAuthRequired
 	}
-	token := s.loadToken()
-	client, err := s.clientForFetch(base, token)
+	token := s.loadTokenForGeneration(base, authGen)
+	client, err := s.clientForFetch(base, token, authGen)
 	if err != nil {
 		return krill.EmptySnapshot(err.Error()), err
 	}
@@ -388,21 +356,44 @@ func (s *Service) Fetch(ctx context.Context) (krill.Snapshot, error) {
 	}
 	email := s.emailSnapshot(base)
 	snap, err := s.fetchWith(ctx, client, status, token, email)
+	if err != nil {
+		if errors.Is(err, ErrAuthRequired) {
+			s.logoutIfCurrent(authGen, base)
+		}
+		return snap, err
+	}
+	if !s.authGenerationIs(authGen) {
+		return krill.EmptySnapshot(ErrAuthRequired.Error()), ErrAuthRequired
+	}
 	if err == nil && token == "" {
+		var persistSession bool
 		s.mu.Lock()
+		if s.authGen != authGen {
+			s.mu.Unlock()
+			return krill.EmptySnapshot(ErrAuthRequired.Error()), ErrAuthRequired
+		}
 		s.sessionClient = client
-		remember := s.rememberLogin
+		persistSession = s.rememberLogin && s.Secrets != nil
 		s.mu.Unlock()
-		if remember && s.Secrets != nil {
-			_ = s.saveAuth(base, "", client, snap.Email, client.UserID)
+		if persistSession {
+			if !s.saveAuthBestEffortIfCurrent(authGen, base, "", client, snap.Email, client.UserID) {
+				return krill.EmptySnapshot(ErrAuthRequired.Error()), ErrAuthRequired
+			}
 		}
 	}
-	return snap, err
+	if !s.rememberEmailIfCurrent(snap.Email, authGen) {
+		return krill.EmptySnapshot(ErrAuthRequired.Error()), ErrAuthRequired
+	}
+	return snap, nil
 }
 
 func (s *Service) Logout() {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
 	base := s.currentBaseURL()
 	s.mu.Lock()
+	s.authGen++
 	s.memToken = ""
 	s.sessionClient = nil
 	s.email = ""
@@ -410,38 +401,130 @@ func (s *Service) Logout() {
 	s.pending = nil
 	s.mu.Unlock()
 	if base != "" {
-		s.clearSaved(base)
+		_ = s.clearSaved(base)
 	}
 }
 
-func (s *Service) ClearSavedLogin() {
-	s.Logout()
+func (s *Service) ClearSavedLogin() error {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	base := s.currentBaseURL()
+	s.mu.Lock()
+	s.authGen++
+	s.memToken = ""
+	s.sessionClient = nil
+	s.email = ""
+	s.userID = ""
+	s.pending = nil
+	s.mu.Unlock()
+	if base == "" {
+		return nil
+	}
+	return s.clearSaved(base)
+}
+
+func (s *Service) authGeneration() uint64 {
+	s.mu.Lock()
+	gen := s.authGen
+	s.mu.Unlock()
+	return gen
+}
+
+func (s *Service) authGenerationIs(gen uint64) bool {
+	s.mu.Lock()
+	ok := s.authGen == gen
+	s.mu.Unlock()
+	return ok
+}
+
+func (s *Service) commitAuthIfCurrent(authGen uint64, base string, remember bool, token string, client *Client, email, userID string) error {
+	userID = cleanUserID(firstNonEmpty(userID, clientUserID(client)))
+	email = strings.TrimSpace(email)
+
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	s.mu.Lock()
+	if s.authGen != authGen {
+		s.mu.Unlock()
+		return ErrAuthRequired
+	}
+	s.mu.Unlock()
+
+	if remember && s.Secrets != nil {
+		if err := s.saveAuth(base, token, client, email, userID); err != nil {
+			return err
+		}
+	} else if err := s.clearSaved(base); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.authGen != authGen {
+		return ErrAuthRequired
+	}
+	s.authGen++
+	s.baseURL = base
+	s.rememberLogin = remember
+	s.memToken = token
+	if token == "" {
+		s.sessionClient = client
+	} else {
+		s.sessionClient = nil
+	}
+	s.email = email
+	s.userID = userID
+	s.pending = nil
+	return nil
+}
+
+func (s *Service) logoutIfCurrent(authGen uint64, base string) {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	s.mu.Lock()
+	if s.authGen != authGen {
+		s.mu.Unlock()
+		return
+	}
+	s.authGen++
+	s.memToken = ""
+	s.sessionClient = nil
+	s.email = ""
+	s.userID = ""
+	s.pending = nil
+	s.mu.Unlock()
+	if base != "" {
+		_ = s.clearSaved(base)
+	}
 }
 
 func (s *Service) fetchWith(ctx context.Context, client *Client, status Status, token, email string) (krill.Snapshot, error) {
 	user, err := client.UserSelf(ctx, token)
 	if err != nil {
-		if errors.Is(err, ErrAuthRequired) {
-			s.Logout()
-		}
 		return krill.EmptySnapshot(err.Error()), err
 	}
 	snap := user.ToSnapshot(status, time.Now())
 	if snap.Email == "" {
 		snap.Email = email
 	}
-	s.rememberEmail(snap.Email)
 	return snap, nil
 }
 
 func (s *Service) loadToken() string {
+	base, authGen := s.currentBaseURLAndGeneration()
+	return s.loadTokenForGeneration(base, authGen)
+}
+
+func (s *Service) loadTokenForGeneration(base string, authGen uint64) string {
 	s.mu.Lock()
 	if s.memToken != "" {
 		token := s.memToken
 		s.mu.Unlock()
 		return token
 	}
-	base := s.baseURL
 	remember := s.rememberLogin
 	s.mu.Unlock()
 	if !remember || base == "" {
@@ -452,13 +535,20 @@ func (s *Service) loadToken() string {
 		return ""
 	}
 	s.mu.Lock()
+	if s.authGen != authGen {
+		s.mu.Unlock()
+		return ""
+	}
 	s.memToken = token
 	s.mu.Unlock()
 	return token
 }
 
-func (s *Service) clientForFetch(base, token string) (*Client, error) {
-	userID := s.loadUserID()
+func (s *Service) clientForFetch(base, token string, authGen uint64) (*Client, error) {
+	userID := s.loadUserIDForGeneration(base, authGen)
+	if !s.authGenerationIs(authGen) {
+		return nil, ErrAuthRequired
+	}
 	if token != "" {
 		client, err := NewClient(base, nil)
 		if err != nil {
@@ -496,18 +586,24 @@ func (s *Service) clientForFetch(base, token string) (*Client, error) {
 }
 
 func (s *Service) currentBaseURL() string {
+	base, _ := s.currentBaseURLAndGeneration()
+	return base
+}
+
+func (s *Service) currentBaseURLAndGeneration() (string, uint64) {
 	s.mu.Lock()
 	base := s.baseURL
+	authGen := s.authGen
 	s.mu.Unlock()
 	if base != "" {
-		return base
+		return base, authGen
 	}
 	if s.Config == nil {
-		return ""
+		return "", authGen
 	}
 	cfg := *s.Config
 	cfg.Normalize()
-	return cfg.NewAPIBaseURL
+	return cfg.NewAPIBaseURL, authGen
 }
 
 func (s *Service) savedToken(baseURL string) string {
@@ -521,14 +617,16 @@ func (s *Service) savedToken(baseURL string) string {
 	return token
 }
 
-func (s *Service) clearSaved(baseURL string) {
+func (s *Service) clearSaved(baseURL string) error {
 	if s.Secrets == nil || baseURL == "" {
-		return
+		return nil
 	}
-	_ = s.Secrets.Set(tokenKey(baseURL), "")
-	_ = s.Secrets.Set(sessionKey(baseURL), "")
-	_ = s.Secrets.Set(emailKey(baseURL), "")
-	_ = s.Secrets.Set(userIDKey(baseURL), "")
+	return s.Secrets.Update(map[string]string{
+		tokenKey(baseURL):   "",
+		sessionKey(baseURL): "",
+		emailKey(baseURL):   "",
+		userIDKey(baseURL):  "",
+	})
 }
 
 func (s *Service) saveAuth(baseURL, token string, client *Client, email, userID string) error {
@@ -536,11 +634,13 @@ func (s *Service) saveAuth(baseURL, token string, client *Client, email, userID 
 		return nil
 	}
 	userID = cleanUserID(firstNonEmpty(userID, clientUserID(client)))
+	updates := map[string]string{
+		emailKey(baseURL):  strings.TrimSpace(email),
+		userIDKey(baseURL): userID,
+	}
 	if token != "" {
-		if err := s.Secrets.Set(tokenKey(baseURL), token); err != nil {
-			return err
-		}
-		_ = s.Secrets.Set(sessionKey(baseURL), "")
+		updates[tokenKey(baseURL)] = token
+		updates[sessionKey(baseURL)] = ""
 	} else if client != nil {
 		cookies, err := client.ExportSessionCookies()
 		if err != nil {
@@ -549,20 +649,31 @@ func (s *Service) saveAuth(baseURL, token string, client *Client, email, userID 
 		if strings.TrimSpace(cookies) == "" {
 			return ErrAuthRequired
 		}
-		if err := s.Secrets.Set(sessionKey(baseURL), cookies); err != nil {
-			return err
-		}
-		_ = s.Secrets.Set(tokenKey(baseURL), "")
+		updates[sessionKey(baseURL)] = cookies
+		updates[tokenKey(baseURL)] = ""
 	}
-	if userID != "" {
-		if err := s.Secrets.Set(userIDKey(baseURL), userID); err != nil {
-			return err
-		}
-	} else {
-		_ = s.Secrets.Set(userIDKey(baseURL), "")
+	return s.Secrets.Update(updates)
+}
+
+func (s *Service) saveAuthBestEffortIfCurrent(authGen uint64, baseURL, token string, client *Client, email, userID string) bool {
+	if s.Secrets == nil || baseURL == "" {
+		return s.authGenerationIs(authGen)
 	}
-	_ = s.Secrets.Set(emailKey(baseURL), strings.TrimSpace(email))
-	return nil
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	s.mu.Lock()
+	current := s.authGen == authGen
+	s.mu.Unlock()
+	if !current {
+		return false
+	}
+	_ = s.saveAuth(baseURL, token, client, email, userID)
+
+	s.mu.Lock()
+	current = s.authGen == authGen
+	s.mu.Unlock()
+	return current
 }
 
 func (s *Service) savedSessionCookies(baseURL string) string {
@@ -577,13 +688,17 @@ func (s *Service) savedSessionCookies(baseURL string) string {
 }
 
 func (s *Service) loadUserID() string {
+	base, authGen := s.currentBaseURLAndGeneration()
+	return s.loadUserIDForGeneration(base, authGen)
+}
+
+func (s *Service) loadUserIDForGeneration(base string, authGen uint64) string {
 	s.mu.Lock()
 	if s.userID != "" {
 		userID := s.userID
 		s.mu.Unlock()
 		return userID
 	}
-	base := s.baseURL
 	remember := s.rememberLogin
 	s.mu.Unlock()
 	if !remember || base == "" {
@@ -594,6 +709,10 @@ func (s *Service) loadUserID() string {
 		return ""
 	}
 	s.mu.Lock()
+	if s.authGen != authGen {
+		s.mu.Unlock()
+		return ""
+	}
 	s.userID = userID
 	s.mu.Unlock()
 	return userID
@@ -611,18 +730,50 @@ func (s *Service) savedUserID(baseURL string) string {
 }
 
 func (s *Service) rememberEmail(email string) {
+	_, authGen := s.currentBaseURLAndGeneration()
+	s.rememberEmailIfCurrent(email, authGen)
+}
+
+func (s *Service) rememberEmailIfCurrent(email string, authGen uint64) bool {
 	email = strings.TrimSpace(email)
 	if email == "" {
-		return
+		return s.authGenerationIs(authGen)
 	}
 	base := s.currentBaseURL()
 	s.mu.Lock()
+	if s.authGen != authGen {
+		s.mu.Unlock()
+		return false
+	}
 	s.email = email
 	remember := s.rememberLogin
+	hasSecrets := s.Secrets != nil
 	s.mu.Unlock()
-	if remember && s.Secrets != nil && base != "" {
-		_ = s.Secrets.Set(emailKey(base), email)
+	if remember && hasSecrets && base != "" {
+		return s.updateSavedBestEffortIfCurrent(authGen, map[string]string{emailKey(base): email})
 	}
+	return s.authGenerationIs(authGen)
+}
+
+func (s *Service) updateSavedBestEffortIfCurrent(authGen uint64, updates map[string]string) bool {
+	if s.Secrets == nil || len(updates) == 0 {
+		return s.authGenerationIs(authGen)
+	}
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	s.mu.Lock()
+	current := s.authGen == authGen
+	s.mu.Unlock()
+	if !current {
+		return false
+	}
+	_ = s.Secrets.Update(updates)
+
+	s.mu.Lock()
+	current = s.authGen == authGen
+	s.mu.Unlock()
+	return current
 }
 
 func (s *Service) emailSnapshot(baseURL string) string {

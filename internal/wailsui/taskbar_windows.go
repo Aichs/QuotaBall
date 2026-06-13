@@ -11,7 +11,7 @@ import (
 )
 
 func hideMainWindowFromTaskbar() {
-	title, err := syscall.UTF16PtrFromString("Krill AI 额度监控")
+	title, err := syscall.UTF16PtrFromString(appWindowTitle)
 	if err != nil {
 		return
 	}

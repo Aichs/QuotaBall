@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"quotaball/internal/krill"
 )
 
 func TestTrayControllerCreatesNotifyIconAndBackgroundMenu(t *testing.T) {
@@ -28,5 +30,18 @@ func TestTrayControllerCreatesNotifyIconAndBackgroundMenu(t *testing.T) {
 		if !strings.Contains(src, want) {
 			t.Fatalf("tray controller is missing %q", want)
 		}
+	}
+}
+
+func TestTrayTooltipUsesNewAPIBalanceInsteadOfWeeklyQuota(t *testing.T) {
+	got := trayTooltip(krill.Snapshot{
+		Provider: "newapi",
+		OK:       true,
+		Wallet:   1.8,
+		Spend:    0.2,
+	})
+	want := "QuotaBall - 余额 $1.80 / 消耗 $0.20"
+	if got != want {
+		t.Fatalf("trayTooltip = %q, want %q", got, want)
 	}
 }

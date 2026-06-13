@@ -67,7 +67,7 @@ func TestTraceGlassBallPixel(t *testing.T) {
 	trace("shadow")
 	drawBackGlass(img, r)
 	trace("back")
-	drawWater(img, r, 17, 0)
+	drawWater(img, r, 17, 0, weeklyWaterPalette())
 	trace("water")
 	drawEquatorBand(img, r)
 	trace("band")
