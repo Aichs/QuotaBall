@@ -21,6 +21,7 @@ body {
 button,
 input,
 label,
+a,
 .scroll {
   --wails-draggable: no-drag;
 }
@@ -30,6 +31,11 @@ label,
   height: 820px;
   position: relative;
   background: transparent;
+}
+
+.login-root {
+  width: 446px;
+  height: 486px;
 }
 
 .shell,
@@ -413,7 +419,11 @@ label,
 
 .dialog.login .dialog-shell {
   width: 430px;
-  height: 350px;
+  height: 470px;
+}
+
+.dialog.login .dialog-content {
+  gap: 8px;
 }
 
 .dialog.settings .dialog-shell {
@@ -421,6 +431,17 @@ label,
   height: 320px;
   border-radius: 24px;
   padding: 20px 22px;
+}
+
+.dialog.about .dialog-shell {
+  width: 408px;
+  height: 500px;
+  border-radius: 24px;
+  padding: 20px 22px 18px;
+}
+
+.dialog.about .dialog-content {
+  gap: 10px;
 }
 
 .dialog-content {
@@ -457,6 +478,195 @@ label,
   height: 3px;
   border-radius: 2px;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.75) 22%, rgba(91, 224, 245, 0.53) 52%, rgba(255, 255, 255, 0));
+}
+
+.provider-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.provider-tab {
+  min-height: 34px;
+  border-radius: 10px;
+  color: #2c6174;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(102, 190, 212, 0.38);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: default;
+}
+
+.provider-tab.active {
+  color: #ffffff;
+  background: linear-gradient(90deg, #0ea5ff, #1ed7d5);
+  border-color: rgba(255, 255, 255, 0.7);
+}
+
+.oauth-button,
+.oauth-copy {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 12px;
+  color: #0d6178;
+  background: rgba(226, 253, 255, 0.82);
+  border: 1px solid rgba(63, 190, 220, 0.57);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: default;
+}
+
+.oauth-copy {
+  min-height: 34px;
+  color: #24556a;
+  background: rgba(255, 255, 255, 0.63);
+}
+
+.oauth-button:hover,
+.oauth-copy:hover {
+  background: rgba(214, 250, 255, 0.94);
+}
+
+.oauth-note,
+.provider-placeholder {
+  min-height: 40px;
+  border-radius: 10px;
+  padding: 9px 10px;
+  color: rgba(49, 88, 106, 0.78);
+  background: rgba(255, 255, 255, 0.42);
+  border: 1px solid rgba(102, 190, 212, 0.31);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.provider-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 118px;
+  color: rgba(49, 88, 106, 0.62);
+}
+
+.about-hero {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  text-align: center;
+}
+
+.about-avatar {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center;
+  border: 3px solid rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 22px rgba(17, 121, 152, 0.22);
+}
+
+.about-card {
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.73), rgba(233, 252, 255, 0.49) 56%, rgba(188, 237, 248, 0.36));
+  border: 1px solid rgba(82, 196, 226, 0.5);
+}
+
+.about-label {
+  color: rgba(52, 89, 105, 0.65);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.about-value {
+  color: #071d2d;
+  font-size: 18px;
+  line-height: 26px;
+  font-weight: 900;
+}
+
+.about-links {
+  display: grid;
+  gap: 8px;
+}
+
+.about-link {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-radius: 12px;
+  padding: 8px 12px;
+  color: #155d76;
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(102, 190, 212, 0.39);
+}
+
+.about-link:hover {
+  background: rgba(214, 250, 255, 0.82);
+}
+
+.about-link span {
+  color: rgba(49, 88, 106, 0.7);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.about-link strong {
+  min-width: 0;
+  color: #0c7f9c;
+  font-size: 13px;
+  line-height: 18px;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.about-community {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-radius: 14px;
+  padding: 11px 12px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(216, 250, 255, 0.48)),
+    rgba(255, 255, 255, 0.34);
+  border: 1px solid rgba(82, 196, 226, 0.47);
+}
+
+.linuxdo-logo {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 12px;
+  color: #ffffff;
+  background: linear-gradient(135deg, #0ea5ff, #1ed7d5);
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.44), 0 8px 18px rgba(17, 121, 152, 0.18);
+}
+
+.community-copy {
+  min-width: 0;
+}
+
+.community-title {
+  color: #08283a;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 900;
+}
+
+.community-copy p {
+  margin: 3px 0 0;
+  color: rgba(49, 88, 106, 0.78);
+  font-size: 11px;
+  line-height: 17px;
 }
 
 .field {
@@ -529,6 +739,11 @@ label,
   color: #ffffff;
   border: 0;
   background: linear-gradient(90deg, #0ea5ff, #1ed7d5);
+}
+
+.primary:disabled {
+  color: rgba(255, 255, 255, 0.82);
+  background: linear-gradient(90deg, #9eb9c6, #b3cdd4);
 }
 
 .secondary {

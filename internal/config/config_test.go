@@ -42,8 +42,8 @@ func TestLoadMigratesLegacyKeysAndNormalizesValues(t *testing.T) {
 	if cfg.WX == nil || *cfg.WX != 120 || cfg.WY == nil || *cfg.WY != 240 {
 		t.Fatalf("window position was not migrated: %#v %#v", cfg.WX, cfg.WY)
 	}
-	if cfg.TbarMetric != "daily" {
-		t.Fatalf("TbarMetric = %q, want daily", cfg.TbarMetric)
+	if cfg.TbarMetric != "weekly" {
+		t.Fatalf("TbarMetric = %q, want weekly", cfg.TbarMetric)
 	}
 }
 
@@ -75,5 +75,31 @@ func TestLoadAcceptsUTF8BOMConfig(t *testing.T) {
 
 	if cfg.Email != "bom@example.com" {
 		t.Fatalf("Email = %q", cfg.Email)
+	}
+}
+
+func TestNormalizeAllowsMonthlyGlassMetricAndMapsLegacyValues(t *testing.T) {
+	cfg := Default()
+	cfg.TbarMetric = "monthly"
+	cfg.Normalize()
+	if cfg.TbarMetric != "monthly" {
+		t.Fatalf("TbarMetric = %q, want monthly", cfg.TbarMetric)
+	}
+
+	for _, legacy := range []string{"daily", "forwarded", "bad-value", ""} {
+		cfg := Default()
+		cfg.TbarMetric = legacy
+		cfg.Normalize()
+		if cfg.TbarMetric != "weekly" {
+			t.Fatalf("legacy TbarMetric %q normalized to %q, want weekly", legacy, cfg.TbarMetric)
+		}
+	}
+}
+
+func TestNormalizeBaseURLDoesNotDoubleEscapeEncodedPath(t *testing.T) {
+	got := normalizeBaseURL("https://newapi.example.test/team%20space/")
+	want := "https://newapi.example.test/team%20space"
+	if got != want {
+		t.Fatalf("normalizeBaseURL = %q, want %q", got, want)
 	}
 }

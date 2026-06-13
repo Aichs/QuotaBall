@@ -11,6 +11,9 @@ import (
 	"testing"
 
 	"github.com/lxn/walk"
+
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
 )
 
 func TestRenderEmptyBallDoesNotDrawCenterMeter(t *testing.T) {
@@ -63,6 +66,151 @@ func TestBallCenterMatchesPySideSphereRect(t *testing.T) {
 	x, y := ballCenter(ballRect())
 	if x != 95 || y != 94 {
 		t.Fatalf("ball center mismatch: got (%v,%v), want (95,94)", x, y)
+	}
+}
+
+func TestNormalizedGlassMetricAllowsWeeklyAndMonthly(t *testing.T) {
+	if got := normalizedGlassMetric("weekly"); got != "weekly" {
+		t.Fatalf("normalizedGlassMetric(weekly) = %q", got)
+	}
+	if got := normalizedGlassMetric("monthly"); got != "monthly" {
+		t.Fatalf("normalizedGlassMetric(monthly) = %q", got)
+	}
+	if got := normalizedGlassMetric("daily"); got != "weekly" {
+		t.Fatalf("legacy daily metric normalized to %q, want weekly", got)
+	}
+}
+
+func TestGlassBallToggleMetricCyclesWeeklyMonthlyAndPersists(t *testing.T) {
+	host := &fakeGlassBallHost{cfg: config.Default()}
+	g := &glassBall{host: host, mode: "weekly"}
+
+	g.toggleMetric()
+	if g.mode != "monthly" || host.cfg.TbarMetric != "monthly" {
+		t.Fatalf("first toggle mode=%q config=%q, want monthly", g.mode, host.cfg.TbarMetric)
+	}
+
+	g.toggleMetric()
+	if g.mode != "weekly" || host.cfg.TbarMetric != "weekly" {
+		t.Fatalf("second toggle mode=%q config=%q, want weekly", g.mode, host.cfg.TbarMetric)
+	}
+}
+
+func TestGlassBallMetricUsesSelectedMonthlyQuota(t *testing.T) {
+	g := &glassBall{
+		mode: "monthly",
+		snap: krill.Snapshot{
+			OK: true,
+			Subscriptions: []krill.Subscription{{
+				WeeklyLimit:      600,
+				WeeklyUsed:       300,
+				WeeklyRemaining:  300,
+				WeeklyPercent:    50,
+				MonthlyLimit:     2400,
+				MonthlyUsed:      600,
+				MonthlyRemaining: 1800,
+				MonthlyPercent:   25,
+			}},
+		},
+	}
+
+	label, pct, used, limit, ok := g.metric()
+	if !ok {
+		t.Fatal("metric returned not ok")
+	}
+	if label != "月总额度" || pct != 25 || used != 600 || limit != 2400 {
+		t.Fatalf("monthly metric = (%q, %v, %v, %v), want monthly quota fields", label, pct, used, limit)
+	}
+}
+
+func TestGlassBallNewAPIMetricIsFullBalanceAndNotToggleable(t *testing.T) {
+	host := &fakeGlassBallHost{cfg: config.Default()}
+	host.cfg.TbarMetric = "monthly"
+	g := &glassBall{
+		host: host,
+		mode: "monthly",
+		snap: krill.Snapshot{
+			Provider: "newapi",
+			OK:       true,
+			Wallet:   1.8,
+			Spend:    0.2,
+			Req:      "618",
+		},
+	}
+
+	state := g.metricState()
+	if !state.ok {
+		t.Fatal("metricState returned not ok")
+	}
+	if state.label != "当前余额" || state.pct != 100 || state.centerText != "$1.80" || state.mode != "weekly" || state.togglable {
+		t.Fatalf("NewAPI metricState = %+v, want full blue balance metric without toggle", state)
+	}
+
+	g.toggleMetric()
+	if g.mode != "monthly" || host.cfg.TbarMetric != "monthly" {
+		t.Fatalf("NewAPI toggle should be disabled, mode=%q config=%q", g.mode, host.cfg.TbarMetric)
+	}
+}
+
+func TestGlassBallMenuToggleActionFollowsMetricState(t *testing.T) {
+	raw, err := os.ReadFile("glassball_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	for _, want := range []string{
+		"metricAction",
+		"g.metricAction = act",
+		"func (g *glassBall) syncMetricAction()",
+		"SetVisible(enabled)",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("glass ball menu toggle action must be hidden when metric is not togglable; missing %q", want)
+		}
+	}
+}
+
+func TestNewAPIFrameUsesFullBlueWaterAndBalanceText(t *testing.T) {
+	base := toRGBA(renderBallImageWithMode(100, true, 0, "weekly"))
+	frame, err := renderBallFrameImageWithCenterText(100, true, 0, "weekly", "$1.80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	water := frame.RGBAAt(95, 44)
+	if water.B <= water.R || water.G <= water.R {
+		t.Fatalf("NewAPI full water should keep the blue weekly palette at top sample: %+v", water)
+	}
+	changed := 0
+	for y := 84; y <= 102; y++ {
+		for x := 74; x <= 116; x++ {
+			a := base.RGBAAt(x, y)
+			b := frame.RGBAAt(x, y)
+			if abs(int(a.R)-int(b.R))+abs(int(a.G)-int(b.G))+abs(int(a.B)-int(b.B))+abs(int(a.A)-int(b.A)) > 18 {
+				changed++
+			}
+		}
+	}
+	if changed < 12 {
+		t.Fatalf("NewAPI frame did not draw center balance text: changed=%d", changed)
+	}
+}
+
+func TestGlassBallMonthlyRenderingUsesWarmWaterPalette(t *testing.T) {
+	weekly, err := renderBallFrameImage(34, true, 0, "weekly")
+	if err != nil {
+		t.Fatal(err)
+	}
+	monthly, err := renderBallFrameImage(34, true, 0, "monthly")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := weekly.RGBAAt(95, 150)
+	m := monthly.RGBAAt(95, 150)
+	if m.R <= m.G || m.R <= m.B {
+		t.Fatalf("monthly water should be warm red at sample pixel: weekly=%+v monthly=%+v", w, m)
+	}
+	if int(m.R)-int(w.R) < 45 || int(w.B)-int(m.B) < 35 {
+		t.Fatalf("monthly water is not visually distinct from weekly cyan: weekly=%+v monthly=%+v", w, m)
 	}
 }
 
@@ -344,3 +492,19 @@ func TestRenderedBallHasNoWhiteBottomPlasterStrip(t *testing.T) {
 func sameRGB(a, b color.RGBA) bool {
 	return a.R == b.R && a.G == b.G && a.B == b.B
 }
+
+type fakeGlassBallHost struct {
+	cfg config.Config
+}
+
+func (h *fakeGlassBallHost) loadGlassConfig() config.Config {
+	return h.cfg
+}
+
+func (h *fakeGlassBallHost) mutateGlassConfig(fn func(*config.Config)) {
+	fn(&h.cfg)
+}
+
+func (h *fakeGlassBallHost) togglePanel() {}
+func (h *fakeGlassBallHost) refresh(bool) {}
+func (h *fakeGlassBallHost) quit()        {}

@@ -1,12 +1,16 @@
 const state = {
   config: {
+    provider: "krill",
     email: "",
+    newapiBaseUrl: "",
+    newapiAutoCallback: true,
     rememberLogin: true,
     refreshSec: 60,
     onTop: true,
     glassEnabled: true,
   },
   snapshot: {
+    provider: "krill",
     spend: 0,
     wallet: 0,
     req: "-",
@@ -21,6 +25,9 @@ const state = {
   modal: "",
   busy: false,
   formError: "",
+  oauthMessage: "",
+  oauthAuthorizeUrl: "",
+  oauthWaitTimer: null,
 };
 
 const app = document.querySelector("#app");
@@ -69,6 +76,19 @@ function plainNumber(value, digits = 0) {
   })}`;
 }
 
+function coalescedNumber(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") {
+      continue;
+    }
+    const n = Number(value);
+    if (Number.isFinite(n)) {
+      return n;
+    }
+  }
+  return 0;
+}
+
 function text(value, fallback = "") {
   if (value === null || value === undefined || value === "") {
     return fallback;
@@ -90,14 +110,55 @@ function pct(value) {
 }
 
 function statCards(snapshot) {
-  const summary = snapshot.summary || {};
-  const totalDaily = Number(summary.totalDailyQuotaUsd || 0);
-  const forwardedRemaining = Number(summary.totalForwardedRemainingUsd || 0);
+  if (isNewAPIProvider(snapshot)) {
+    return newAPIStatCards(snapshot);
+  }
+  return krillStatCards(snapshot);
+}
+
+function isNewAPIProvider(snapshot) {
+  return text(snapshot?.provider || state.config.provider || "krill") === "newapi";
+}
+
+function newAPIStatCards(snapshot) {
   return [
     {
-      title: "今日花费",
+      title: "当前余额",
+      value: money(snapshot.wallet, 2),
+      sub: "可用余额",
+      color: "#28b8ff",
+    },
+    {
+      title: "历史消耗",
       value: money(snapshot.spend, 2),
-      sub: `转结 ${money(forwardedRemaining, 2)} · 剩余 ${money(Math.max(0, totalDaily - Number(snapshot.spend || 0)), 2)}`,
+      sub: "累计已用额度",
+      color: "#ffad2f",
+    },
+    {
+      title: "请求次数",
+      value: text(snapshot.req, "-"),
+      sub: "累计请求数",
+      color: "#31df9a",
+    },
+  ];
+}
+
+function krillStatCards(snapshot) {
+  const summary = snapshot.summary || {};
+  const weeklyLimit = coalescedNumber(summary.totalWeeklyQuotaUsd, summary.totalDailyQuotaUsd);
+  const weeklyRemaining = coalescedNumber(
+    summary.totalWeeklyRemainingUsd,
+    summary.totalRemainingUsd,
+    Math.max(0, weeklyLimit - Number(snapshot.spend || 0)),
+  );
+  const weeklyUsed = Math.max(0, weeklyLimit - weeklyRemaining);
+  const monthlyLimit = coalescedNumber(summary.totalMonthlyQuotaUsd);
+  const monthlyUsed = coalescedNumber(summary.totalMonthlyUsedUsd, summary.totalUsedUsd, snapshot.spend);
+  return [
+    {
+      title: "本周剩余",
+      value: money(weeklyRemaining, 2),
+      sub: `已用 ${money(weeklyUsed, 2)} / 总计 ${money(weeklyLimit, 2)}`,
       color: "#ffad2f",
     },
     {
@@ -107,15 +168,15 @@ function statCards(snapshot) {
       color: "#28b8ff",
     },
     {
-      title: "日额度",
-      value: plainNumber(totalDaily, 0),
-      sub: `已用 ${money(snapshot.spend, 2)} / 总计 ${plainNumber(totalDaily, 0)}`,
+      title: "周额度",
+      value: plainNumber(weeklyLimit, 0),
+      sub: `剩余 ${money(weeklyRemaining, 2)}`,
       color: "#31df9a",
     },
     {
-      title: "缓存率",
-      value: text(snapshot.cache, "-"),
-      sub: "缓存命中 / 请求数",
+      title: "月总额度",
+      value: monthlyLimit > 0 ? plainNumber(monthlyLimit, 0) : "-",
+      sub: monthlyLimit > 0 ? `已用 ${money(monthlyUsed, 2)} / 总计 ${plainNumber(monthlyLimit, 0)}` : `已用 ${money(monthlyUsed, 2)}`,
       color: "#9b7cff",
     },
   ];
@@ -161,20 +222,26 @@ function renderMainPanel(s) {
           ${renderHeader(s)}
           <div class="error">${escapeHTML(s.err || "")}</div>
           ${renderStats(s)}
-          <div class="section-row">
-            <div class="section-title">套餐</div>
-            <div class="muted">${subs.length} 张</div>
-            <div class="spacer"></div>
-          </div>
-          <div class="scroll">
-            <div class="subs">
-              ${subs.length ? subs.map(renderSub).join("") : `<div class="empty"></div>`}
-            </div>
-          </div>
+          ${isNewAPIProvider(s) ? "" : renderSubscriptionSection(subs)}
         </div>
       </section>
       ${renderModal()}
     </main>
+  `;
+}
+
+function renderSubscriptionSection(subs) {
+  return `
+    <div class="section-row">
+      <div class="section-title">套餐</div>
+      <div class="muted">${subs.length} 张</div>
+      <div class="spacer"></div>
+    </div>
+    <div class="scroll">
+      <div class="subs">
+        ${subs.length ? subs.map(renderSub).join("") : `<div class="empty"></div>`}
+      </div>
+    </div>
   `;
 }
 
@@ -183,12 +250,13 @@ function renderHeader(s) {
     <header class="header">
       <div class="logo">◒</div>
       <div class="brand">
-        <div class="title">Krill</div>
+        <div class="title">QuotaBall</div>
         <div class="subtitle">额度监控</div>
       </div>
       <div class="time">${escapeHTML(s.timeLabel || "")}</div>
       <div class="spacer"></div>
       <button class="icon-btn" data-action="settings" title="设置">⚙</button>
+      <button class="icon-btn" data-action="about" title="关于">i</button>
       <button class="icon-btn" data-action="refresh" title="立即刷新">↻</button>
       <button class="icon-btn" data-action="hide" title="隐藏">—</button>
       <button class="auth-btn" data-action="auth">${s.loggedIn ? "退出登录" : "登录"}</button>
@@ -212,6 +280,7 @@ function renderStats(s) {
 
 function renderSub(sub) {
   const routes = Array.isArray(sub.routes) ? sub.routes.slice(0, 6) : [];
+  const quota = subQuota(sub);
   return `
     <section class="sub-card">
       <div class="sub-top">
@@ -220,10 +289,25 @@ function renderSub(sub) {
       </div>
       <div class="sub-detail">#${escapeHTML(sub.id)}  ·  ${escapeHTML(sub.start)} → ${escapeHTML(sub.end)}</div>
       ${routes.length ? `<div class="routes">${routes.map((route) => `<span class="route">${escapeHTML(route)}</span>`).join("")}</div>` : ""}
-      ${renderQuota("转结", sub.forwardedUsed, sub.forwardedLimit, sub.forwardedPercent)}
-      ${renderQuota("当日", sub.dailyUsed, sub.dailyLimit, sub.dailyPercent)}
+      ${renderQuota("周额度", quota.weeklyUsed, quota.weeklyLimit, quota.weeklyPercent)}
+      ${renderQuota("月总额度", quota.monthlyUsed, quota.monthlyLimit, quota.monthlyPercent)}
     </section>
   `;
+}
+
+function subQuota(sub) {
+  const weeklyLimit = coalescedNumber(sub.weeklyLimit, sub.dailyLimit);
+  const weeklyUsed = coalescedNumber(sub.weeklyUsed, sub.dailyUsed);
+  const monthlyLimit = coalescedNumber(sub.monthlyLimit, weeklyLimit);
+  const monthlyUsed = coalescedNumber(sub.monthlyUsed, weeklyUsed);
+  return {
+    weeklyLimit,
+    weeklyUsed,
+    weeklyPercent: coalescedNumber(sub.weeklyPercent, weeklyLimit > 0 ? (weeklyUsed / weeklyLimit) * 100 : 0),
+    monthlyLimit,
+    monthlyUsed,
+    monthlyPercent: coalescedNumber(sub.monthlyPercent, monthlyLimit > 0 ? (monthlyUsed / monthlyLimit) * 100 : 0),
+  };
 }
 
 function renderQuota(label, used, limit, percent) {
@@ -245,32 +329,37 @@ function renderModal() {
   if (state.modal === "settings") {
     return renderSettings();
   }
+  if (state.modal === "about") {
+    return renderAbout();
+  }
   return `<div class="modal" hidden></div>`;
 }
 
 function renderLogin(asModal = true) {
-  const err = state.formError || "";
+  const provider = state.config.provider || "krill";
+  const err = state.formError || loggedOutSnapshotError(provider);
+  const formName = provider === "newapi" ? "newapi-complete" : "login";
+  const title = provider === "newapi" ? "登录 NewAPI" : provider === "sub2" ? "登录 Sub2" : "登录 Krill AI";
   const body = `
-    <form class="dialog login" data-form="login">
+    <form class="dialog login" data-form="${formName}">
       <div class="dialog-shell">
-        <div class="dots">${renderDialogDots(430, 350)}</div>
+        <div class="dots">${renderDialogDots(430, 430)}</div>
         <div class="dialog-content">
           <div class="dialog-brand">
             <div class="login-orb">◒</div>
             <div>
-              <div class="dialog-title">登录 Krill AI</div>
+              <div class="dialog-title">${title}</div>
               <div class="subtitle">额度监控</div>
             </div>
             <div class="spacer"></div>
           </div>
           <div class="glass-line"></div>
-          <input class="field" name="email" autocomplete="username" placeholder="邮箱" value="${escapeHTML(state.config.email || "")}" />
-          <input class="field" name="password" autocomplete="current-password" placeholder="密码" type="password" />
-          <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+          ${renderProviderTabs(provider)}
+          ${renderProviderLoginFields(provider)}
           <div class="error">${escapeHTML(err)}</div>
           <div class="dialog-buttons">
             <button class="secondary" type="button" data-action="cancel-modal">取消</button>
-            <button class="primary" type="submit">${state.busy ? "登录中..." : "登录"}</button>
+            ${renderLoginPrimaryButton(provider)}
           </div>
         </div>
       </div>
@@ -286,8 +375,85 @@ function renderLogin(asModal = true) {
   `;
 }
 
+function loggedOutSnapshotError(provider) {
+  if (state.snapshot?.loggedIn) {
+    return "";
+  }
+  const err = text(state.snapshot?.err).trim();
+  if (!err || err === "正在检查登录状态...") {
+    return "";
+  }
+  if (provider === "newapi" && err === "请登录 Krill AI") {
+    return "";
+  }
+  if (provider === "krill" && err === "请登录 NewAPI") {
+    return "";
+  }
+  return err;
+}
+
+function renderProviderTabs(provider) {
+  const providers = [
+    ["newapi", "NewAPI"],
+    ["sub2", "Sub2"],
+    ["krill", "Krill AI"],
+  ];
+  return `
+    <div class="provider-tabs">
+      ${providers.map(([value, label]) => `
+        <button
+          class="provider-tab ${provider === value ? "active" : ""}"
+          type="button"
+          data-action="provider"
+          data-provider="${value}"
+        >${label}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderProviderLoginFields(provider) {
+  if (provider === "newapi") {
+    const auto = Boolean(state.config.newapiAutoCallback);
+    return `
+      <input class="field" name="newapiBaseUrl" autocomplete="url" placeholder="NewAPI 网站地址，例如 https://newapi.example.com" value="${escapeHTML(state.config.newapiBaseUrl || "")}" />
+      <button class="oauth-button" type="button" data-action="newapi-start-oauth">${state.busy ? "打开中..." : "使用 LinuxDo 登录"}</button>
+      ${!auto && state.oauthAuthorizeUrl ? `<button class="oauth-copy" type="button" data-action="copy-oauth-url">复制授权链接</button>` : ""}
+      <label class="check"><input type="checkbox" name="autoCallback" ${auto ? "checked" : ""} />自动完成登录（独立窗口）</label>
+      ${!auto ? `<input class="field" name="callbackUrl" autocomplete="off" placeholder="粘贴登录完成后的回调 URL" />` : ""}
+      <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+      <div class="oauth-note">${escapeHTML(state.oauthMessage || (auto ? "LinuxDo 授权完成后会自动登录；首次可能需要登录，之后会记住。" : "使用当前浏览器登录态打开授权页；完成后请复制地址栏完整回调 URL。"))}</div>
+    `;
+  }
+  if (provider === "sub2") {
+    return `
+      <div class="provider-placeholder">Sub2 支持暂未开放</div>
+      <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+    `;
+  }
+  return `
+    <input class="field" name="email" autocomplete="username" placeholder="邮箱" value="${escapeHTML(state.config.email || "")}" />
+    <input class="field" name="password" autocomplete="current-password" placeholder="密码" type="password" />
+    <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
+  `;
+}
+
+function renderLoginPrimaryButton(provider) {
+  if (provider === "newapi") {
+    if (state.config.newapiAutoCallback) {
+      return "";
+    }
+    return `<button class="primary" type="submit">${state.busy ? "验证中..." : "完成登录"}</button>`;
+  }
+  if (provider === "sub2") {
+    return `<button class="primary" type="button" disabled>暂未开放</button>`;
+  }
+  return `<button class="primary" type="submit">${state.busy ? "登录中..." : "登录"}</button>`;
+}
+
 function renderSettings() {
   const cfg = state.config || {};
+  const showGlass = showGlassSetting();
   return `
     <div class="modal">
       <form class="dialog settings" data-form="settings">
@@ -300,7 +466,7 @@ function renderSettings() {
               <span class="field-suffix">秒刷新</span>
             </div>
             <label class="check"><input type="checkbox" name="onTop" ${cfg.onTop ? "checked" : ""} />窗口置顶</label>
-            <label class="check"><input type="checkbox" name="glassEnabled" ${cfg.glassEnabled ? "checked" : ""} />显示玻璃球</label>
+            ${showGlass ? `<label class="check"><input type="checkbox" name="glassEnabled" ${cfg.glassEnabled ? "checked" : ""} />显示玻璃球</label>` : ""}
             <label class="check"><input type="checkbox" name="remember" ${cfg.rememberLogin ? "checked" : ""} />记住登录状态</label>
             <div class="dialog-buttons">
               <button class="secondary" type="button" data-action="cancel-modal">取消</button>
@@ -311,6 +477,54 @@ function renderSettings() {
       </form>
     </div>
   `;
+}
+
+function renderAbout() {
+  return `
+    <div class="modal">
+      <section class="dialog about">
+        <div class="dialog-shell">
+          <div class="dots">${renderDialogDots(408, 500)}</div>
+          <div class="dialog-content">
+            <div class="about-hero">
+              <img class="about-avatar" src="assets/about-avatar.png" alt="晏琳" />
+              <div class="dialog-title">关于 QuotaBall</div>
+              <div class="subtitle">额度监控</div>
+            </div>
+            <div class="glass-line"></div>
+            <div class="about-card">
+              <div class="about-label">作者</div>
+              <div class="about-value">晏琳</div>
+            </div>
+            <div class="about-links">
+              <a class="about-link" href="https://github.com/Aichs/QuotaBall/tree/feature/newapi-integration" target="_blank" rel="noreferrer">
+                <span>GitHub</span>
+                <strong>QuotaBall</strong>
+              </a>
+              <a class="about-link" href="https://linux.do/u/aichs/summary" target="_blank" rel="noreferrer">
+                <span>LinuxDo</span>
+                <strong>aichs</strong>
+              </a>
+            </div>
+            <div class="about-community">
+              <span class="linuxdo-logo" aria-hidden="true">LD</span>
+              <div class="community-copy">
+                <div class="community-title">LinuxDo 社区</div>
+                <p>新的理想型社区，面向开发者与 AI 实践者，倡导真诚、友善、团结、专业的交流氛围。</p>
+              </div>
+            </div>
+            <div class="dialog-buttons">
+              <button class="primary" type="button" data-action="cancel-modal">关闭</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function showGlassSetting() {
+  return !isNewAPIProvider(state.snapshot);
 }
 
 function renderDialogDots(w, h) {
@@ -331,6 +545,10 @@ function bindEvents() {
   if (login) {
     login.addEventListener("submit", onLogin);
   }
+  const newapi = app.querySelector('[data-form="newapi-complete"]');
+  if (newapi) {
+    newapi.addEventListener("submit", onNewAPIComplete);
+  }
   const settings = app.querySelector('[data-form="settings"]');
   if (settings) {
     settings.addEventListener("submit", onSettings);
@@ -339,6 +557,15 @@ function bindEvents() {
 
 async function onAction(event) {
   const action = event.currentTarget.dataset.action;
+  if (action === "provider") {
+    syncLoginFormState(event.currentTarget.closest("form"));
+    state.config.provider = event.currentTarget.dataset.provider || "krill";
+    state.formError = "";
+    state.oauthMessage = "";
+    state.oauthAuthorizeUrl = "";
+    render();
+    return;
+  }
   const api = backend();
   if (!api) {
     return;
@@ -346,6 +573,10 @@ async function onAction(event) {
   if (action === "settings") {
     state.formError = "";
     state.modal = "settings";
+    render();
+  } else if (action === "about") {
+    state.formError = "";
+    state.modal = "about";
     render();
   } else if (action === "refresh") {
     await callRefresh();
@@ -371,6 +602,10 @@ async function onAction(event) {
     state.modal = "";
     state.formError = "";
     render();
+  } else if (action === "newapi-start-oauth") {
+    await startNewAPIOAuth(event.currentTarget.closest("form"));
+  } else if (action === "copy-oauth-url") {
+    await copyOAuthAuthorizeURL();
   }
 }
 
@@ -387,15 +622,28 @@ async function callRefresh() {
       state.modal = "login";
     }
   } catch (err) {
-    state.snapshot = { ...state.snapshot, err: String(err || "刷新失败") };
+    const message = String(err || "刷新失败");
+    if (isAuthRequiredMessage(message)) {
+      state.snapshot = { ...state.snapshot, err: message, ok: false, loggedIn: false };
+      state.modal = "login";
+    } else {
+      state.snapshot = { ...state.snapshot, err: message };
+    }
   } finally {
     state.busy = false;
     render();
   }
 }
 
+function isAuthRequiredMessage(message) {
+  return /请登录|auth required|unauthorized|token not provided/i.test(String(message || ""));
+}
+
 async function onLogin(event) {
   event.preventDefault();
+  if ((state.config.provider || "krill") !== "krill") {
+    return;
+  }
   if (state.busy) {
     return;
   }
@@ -412,7 +660,7 @@ async function onLogin(event) {
   state.formError = "";
   render();
   try {
-    const snap = await backend().Login({ email, password, rememberLogin });
+    const snap = await backend().Login({ provider: "krill", email, password, rememberLogin });
     state.snapshot = snap;
     state.config = { ...state.config, email, rememberLogin };
     state.modal = "";
@@ -425,6 +673,169 @@ async function onLogin(event) {
   }
 }
 
+function syncLoginFormState(form) {
+  if (!form) {
+    return;
+  }
+  const data = new FormData(form);
+  if (form.querySelector('input[name="remember"]')) {
+    state.config.rememberLogin = data.get("remember") === "on";
+  }
+  if (data.has("newapiBaseUrl")) {
+    state.config.newapiBaseUrl = text(data.get("newapiBaseUrl")).trim();
+  }
+  if (form.querySelector('input[name="autoCallback"]')) {
+    state.config.newapiAutoCallback = data.get("autoCallback") === "on";
+  }
+}
+
+async function startNewAPIOAuth(form) {
+  if (state.busy) {
+    return;
+  }
+  syncLoginFormState(form);
+  const baseUrl = state.config.newapiBaseUrl || "";
+  if (!baseUrl) {
+    state.formError = "请输入 NewAPI 网站地址";
+    render();
+    return;
+  }
+  state.busy = true;
+  state.formError = "";
+  state.oauthMessage = "";
+  state.oauthAuthorizeUrl = "";
+  render();
+  try {
+    const started = await backend().StartNewAPIOAuth({
+      baseUrl,
+      rememberLogin: state.config.rememberLogin,
+      autoCallback: state.config.newapiAutoCallback,
+    });
+    state.config.provider = "newapi";
+    state.config.newapiBaseUrl = started.baseUrl || baseUrl;
+    state.oauthAuthorizeUrl = started.autoCapture ? "" : (started.authorizeUrl || "");
+    state.oauthMessage = started.autoCapture
+      ? "已打开独立授权窗口，LinuxDo 授权完成后会自动登录；首次可能需要登录，之后会记住。"
+      : "已用当前浏览器打开授权页。完成后请复制 NewAPI 回调页地址栏完整 URL。";
+    if (started.autoCapture) {
+      scheduleOAuthWaitTimeout();
+    } else {
+      clearOAuthWaitTimer();
+    }
+  } catch (err) {
+    clearOAuthWaitTimer();
+    state.formError = String(err || "启动 LinuxDo 登录失败");
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+function scheduleOAuthWaitTimeout() {
+  clearOAuthWaitTimer();
+  state.oauthWaitTimer = window.setTimeout(() => {
+    state.oauthWaitTimer = null;
+    if (state.snapshot.loggedIn || (state.config.provider || "") !== "newapi") {
+      return;
+    }
+    state.busy = false;
+    state.formError = "NewAPI 自动登录超时，请确认授权窗口已完成跳转后重试。";
+    state.oauthMessage = "";
+    state.modal = "login";
+    render();
+  }, 120000);
+}
+
+function clearOAuthWaitTimer() {
+  if (state.oauthWaitTimer) {
+    window.clearTimeout(state.oauthWaitTimer);
+    state.oauthWaitTimer = null;
+  }
+}
+
+async function copyOAuthAuthorizeURL() {
+  if (!state.oauthAuthorizeUrl) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(state.oauthAuthorizeUrl);
+    state.oauthMessage = "授权链接已复制。LinuxDo 授权页恢复后，在浏览器打开该链接继续登录。";
+  } catch {
+    state.oauthMessage = state.oauthAuthorizeUrl;
+  }
+  render();
+}
+
+async function onNewAPIComplete(event) {
+  event.preventDefault();
+  if (state.busy) {
+    return;
+  }
+  const form = new FormData(event.currentTarget);
+  const baseUrl = text(form.get("newapiBaseUrl")).trim();
+  const callbackUrl = text(form.get("callbackUrl")).trim();
+  const rememberLogin = form.get("remember") === "on";
+  if (!baseUrl || !callbackUrl) {
+    state.formError = "请输入网站地址并粘贴回调 URL";
+    render();
+    return;
+  }
+  state.busy = true;
+  state.formError = "";
+  render();
+  try {
+    await completeNewAPIOAuthFromCallback({
+      baseUrl,
+      callbackUrl,
+      rememberLogin,
+    });
+  } catch (err) {
+    state.formError = String(err || "NewAPI 登录失败");
+    state.modal = "login";
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function completeNewAPIOAuthFromCallback(payload) {
+  const baseUrl = text(payload?.baseUrl || state.config.newapiBaseUrl).trim();
+  const callbackUrl = text(payload?.callbackUrl).trim();
+  const sessionCookies = text(payload?.sessionCookies).trim();
+  const accessToken = text(payload?.accessToken).trim();
+  const userId = text(payload?.userId).trim();
+  const rememberLogin = typeof payload?.rememberLogin === "boolean" ? payload.rememberLogin : state.config.rememberLogin;
+  if (!baseUrl || (!callbackUrl && !sessionCookies && !accessToken)) {
+    state.formError = "NewAPI 回调 URL 无效";
+    state.modal = "login";
+    render();
+    return;
+  }
+  state.busy = true;
+  state.formError = "";
+  state.oauthMessage = "正在完成 NewAPI 登录...";
+  render();
+  const snap = await backend().CompleteNewAPIOAuth({
+    baseUrl,
+    callbackUrl,
+    sessionCookies,
+    accessToken,
+    userId,
+    rememberLogin,
+  });
+  state.snapshot = snap;
+  if (!snap.loggedIn) {
+    state.formError = snap.err || "NewAPI 登录失败";
+    state.modal = "login";
+    return;
+  }
+  state.config = { ...state.config, provider: "newapi", newapiBaseUrl: baseUrl, rememberLogin };
+  state.modal = "";
+  state.oauthMessage = "";
+  state.oauthAuthorizeUrl = "";
+  clearOAuthWaitTimer();
+}
+
 async function onSettings(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -432,8 +843,10 @@ async function onSettings(event) {
   const payload = {
     refreshSec,
     onTop: form.get("onTop") === "on",
-    glassEnabled: form.get("glassEnabled") === "on",
+    glassEnabled: showGlassSetting() ? form.get("glassEnabled") === "on" : Boolean(state.config.glassEnabled),
     rememberLogin: form.get("remember") === "on",
+    provider: state.config.provider || "krill",
+    newapiBaseUrl: state.config.newapiBaseUrl || "",
   };
   try {
     const cfg = await backend().SaveSettings(payload);
@@ -452,6 +865,10 @@ async function boot() {
     window.runtime.EventsOn("snapshot:update", (snap) => {
       state.snapshot = snap;
       if (snap.loggedIn && state.modal === "login") {
+        clearOAuthWaitTimer();
+        state.busy = false;
+        state.oauthMessage = "";
+        state.formError = "";
         state.modal = "";
       }
       if (!snap.loggedIn) {
@@ -459,9 +876,31 @@ async function boot() {
       }
       render();
     });
+    window.runtime.EventsOn("oauth:error", (message) => {
+      clearOAuthWaitTimer();
+      state.busy = false;
+      state.formError = String(message || "NewAPI 登录失败");
+      state.oauthMessage = "";
+      state.modal = "login";
+      render();
+    });
+    window.runtime.EventsOn("oauth:callback", async (payload) => {
+      try {
+        clearOAuthWaitTimer();
+        await completeNewAPIOAuthFromCallback(payload);
+      } catch (err) {
+        state.formError = String(err || "NewAPI 登录失败");
+        state.modal = "login";
+      } finally {
+        state.busy = false;
+        render();
+      }
+    });
   }
   const initial = await api.Bootstrap();
-  state.config = initial.config;
+  state.config = { ...state.config, ...initial.config };
+  state.config.provider ||= "krill";
+  state.config.newapiBaseUrl ||= "";
   state.snapshot = initial.snapshot;
   if (!state.snapshot.loggedIn) {
     state.modal = "login";

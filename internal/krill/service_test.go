@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"krill_monitor/internal/config"
+	"quotaball/internal/config"
 )
 
 func TestFetchAutoLoginResultIsIgnoredAfterLogout(t *testing.T) {

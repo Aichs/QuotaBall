@@ -11,8 +11,8 @@ import (
 	. "github.com/lxn/walk/declarative"
 	"github.com/lxn/win"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/krill"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
 )
 
 type GlassControllerOptions struct {
@@ -66,7 +66,7 @@ func (c *GlassController) run() {
 	var host *walk.MainWindow
 	if err := (MainWindow{
 		AssignTo: &host,
-		Title:    "Krill AI",
+		Title:    "QuotaBall",
 		Size:     Size{Width: 1, Height: 1},
 		Layout:   VBox{MarginsZero: true},
 	}).Create(); err != nil {

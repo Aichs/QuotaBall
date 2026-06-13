@@ -111,3 +111,55 @@ func TestParseSubscriptionAcceptsNumericSubscriptionID(t *testing.T) {
 		t.Fatalf("ID = %q, want 12345", got)
 	}
 }
+
+func TestParseSubscriptionBuildsWeeklyAndMonthlyQuotaState(t *testing.T) {
+	const raw = `{
+		"summary":{
+			"total_used_usd":"384.649625",
+			"total_daily_quota_usd":"1200.000000",
+			"total_remaining_usd":"815.350375"
+		},
+		"credit_balance_usd":"0.000000",
+		"welfare_balance_usd":"0",
+		"subscriptions":[{
+			"subscription_id":5344,
+			"subscription_start_at":"2026-06-10T04:23:51.603582Z",
+			"subscription_end_at":"2026-07-10T04:23:51.603582Z",
+			"total_used_usd":"384.649625",
+			"plan":{
+				"name":"轻享月卡",
+				"billing_type":"usd_weekly",
+				"duration_days":30,
+				"entry_route_keys":["直连","cdn"],
+				"total_credits":null
+			},
+			"quota":{
+				"daily_limit_usd":"600.000000",
+				"remaining_usd":"215.350375",
+				"used_usd":"384.649625",
+				"window_start_at":"2026-06-09T16:00:00Z",
+				"window_reset_at":"2026-06-16T16:00:00Z"
+			}
+		}]
+	}`
+	var payload SubscriptionPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := payload.ToSnapshot(time.Date(2026, 6, 13, 8, 0, 0, 0, time.UTC))
+
+	if snap.Summary.TotalWeeklyQuotaUSD != 1200 {
+		t.Fatalf("TotalWeeklyQuotaUSD = %v, want 1200", snap.Summary.TotalWeeklyQuotaUSD)
+	}
+	if snap.Summary.TotalWeeklyRemainingUSD != 815.350375 {
+		t.Fatalf("TotalWeeklyRemainingUSD = %v, want 815.350375", snap.Summary.TotalWeeklyRemainingUSD)
+	}
+	sub := snap.Subscriptions[0]
+	if sub.WeeklyLimit != 600 || sub.WeeklyUsed != 384.649625 || sub.WeeklyRemaining != 215.350375 {
+		t.Fatalf("weekly fields = limit %v used %v remaining %v", sub.WeeklyLimit, sub.WeeklyUsed, sub.WeeklyRemaining)
+	}
+	if sub.MonthlyLimit != 2400 || sub.MonthlyUsed != 384.649625 || sub.MonthlyPercent != 16 {
+		t.Fatalf("monthly fields = limit %v used %v pct %v", sub.MonthlyLimit, sub.MonthlyUsed, sub.MonthlyPercent)
+	}
+}

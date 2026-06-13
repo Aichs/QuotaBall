@@ -17,10 +17,10 @@ import (
 	. "github.com/lxn/walk/declarative"
 	"github.com/lxn/win"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/krill"
-	"krill_monitor/internal/paths"
-	"krill_monitor/internal/secret"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
+	"quotaball/internal/paths"
+	"quotaball/internal/secret"
 )
 
 const transparentKey = 0x00fbfff5
@@ -118,7 +118,7 @@ func Run() error {
 func (a *app) buildMainWindow() error {
 	if err := (MainWindow{
 		AssignTo: &a.mw,
-		Title:    "Krill AI 额度监控",
+		Title:    "QuotaBall",
 		Size:     Size{panelWidth, panelHeight},
 		MinSize:  Size{panelWidth, panelHeight},
 		MaxSize:  Size{panelWidth, panelHeight},
@@ -187,7 +187,7 @@ func (a *app) buildTray() error {
 	if err := ni.SetIcon(icon); err != nil {
 		return err
 	}
-	ni.SetToolTip("Krill AI")
+	ni.SetToolTip("QuotaBall")
 	ni.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
 		if button == walk.LeftButton {
 			a.togglePanel()
@@ -228,18 +228,25 @@ func (a *app) applySnapshot(s krill.Snapshot) {
 		} else {
 			a.authButton.SetText("登录")
 		}
-		tq := s.Summary.TotalDailyQuotaUSD
-		fr := s.Summary.TotalForwardedRemainingUSD
+		weeklyQuota := firstPositive(s.Summary.TotalWeeklyQuotaUSD, s.Summary.TotalDailyQuotaUSD)
+		weeklyRemaining := firstPositive(s.Summary.TotalWeeklyRemainingUSD, s.Summary.TotalRemainingUSD, math.Max(0, weeklyQuota-s.Spend))
+		weeklyUsed := math.Max(0, weeklyQuota-weeklyRemaining)
+		monthlyQuota := s.Summary.TotalMonthlyQuotaUSD
+		monthlyUsed := firstPositive(s.Summary.TotalMonthlyUsedUSD, s.Summary.TotalUsedUSD, s.Spend)
 		a.spendValue.SetText(money(s.Spend, 2))
-		a.spendSub.SetText(fmt.Sprintf("转结 %s · 剩余 %s", money(fr, 2), money(math.Max(0, tq-s.Spend), 2)))
+		a.spendSub.SetText(fmt.Sprintf("周剩余 %s · 已用 %s", money(weeklyRemaining, 2), money(weeklyUsed, 2)))
 		a.walletValue.SetText(money(s.Wallet, 2))
 		if s.Wallet == 0 {
 			a.walletSub.SetText("额度用完自动消耗")
 		} else {
 			a.walletSub.SetText("信用 + 福利")
 		}
-		a.quotaValue.SetText(money(tq, 0))
-		a.quotaSub.SetText(fmt.Sprintf("已用 %s / 总计 %s", money(s.Spend, 2), money(tq, 0)))
+		a.quotaValue.SetText(money(weeklyQuota, 0))
+		if monthlyQuota > 0 {
+			a.quotaSub.SetText(fmt.Sprintf("月总 %s · 已用 %s", money(monthlyQuota, 0), money(monthlyUsed, 2)))
+		} else {
+			a.quotaSub.SetText(fmt.Sprintf("已用 %s / 总计 %s", money(weeklyUsed, 2), money(weeklyQuota, 0)))
+		}
 		a.cacheValue.SetText(s.Cache)
 		a.cacheSub.SetText("缓存命中 / 请求数")
 		a.subCount.SetText(fmt.Sprintf("%d 张", len(s.Subscriptions)))
@@ -297,8 +304,8 @@ func (a *app) addSubscriptionCard(sub krill.Subscription) {
 			label(routes, r, 8, false, walk.RGB(35, 86, 107))
 		}
 	}
-	addQuota(card, "转结", sub.ForwardedUsed, sub.ForwardedLimit, sub.ForwardedPercent)
-	addQuota(card, "当日", sub.DailyUsed, sub.DailyLimit, sub.DailyPercent)
+	addQuota(card, "周额度", firstPositive(sub.WeeklyUsed, sub.DailyUsed), firstPositive(sub.WeeklyLimit, sub.DailyLimit), firstPositive(sub.WeeklyPercent, sub.DailyPercent))
+	addQuota(card, "月总额度", firstPositive(sub.MonthlyUsed, sub.WeeklyUsed, sub.DailyUsed), firstPositive(sub.MonthlyLimit, sub.WeeklyLimit, sub.DailyLimit), sub.MonthlyPercent)
 }
 
 func addQuota(parent walk.Container, title string, used, limit, pct float64) {
@@ -427,7 +434,7 @@ func (a *app) showLogin() {
 		},
 	}.Run(a.mw))
 	if err != nil {
-		walk.MsgBox(a.mw, "Krill AI", err.Error(), walk.MsgBoxIconError)
+		walk.MsgBox(a.mw, "QuotaBall", err.Error(), walk.MsgBoxIconError)
 	}
 }
 
@@ -474,7 +481,7 @@ func (a *app) showSettings() {
 		},
 	}.Run(a.mw))
 	if err != nil {
-		walk.MsgBox(a.mw, "Krill AI", err.Error(), walk.MsgBoxIconError)
+		walk.MsgBox(a.mw, "QuotaBall", err.Error(), walk.MsgBoxIconError)
 	}
 }
 
@@ -575,9 +582,9 @@ func (a *app) updateTrayTooltip() {
 	a.mu.Lock()
 	s := a.snap
 	a.mu.Unlock()
-	tip := "Krill AI"
+	tip := "QuotaBall"
 	if s.OK {
-		tip = fmt.Sprintf("剩余 %s · 今日 %s", money(s.RemainingDaily(), 2), money(s.Spend, 2))
+		tip = fmt.Sprintf("周剩余 %s · 已用 %s", money(s.RemainingWeekly(), 2), money(s.Spend, 2))
 	} else if s.Err != "" {
 		tip = s.Err
 	}

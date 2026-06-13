@@ -1,51 +1,129 @@
 # QuotaBall
 
-Go/Wails 桌面版 Krill AI 额度监控工具。应用提供主面板、系统托盘和独立玻璃球浮窗，用于实时查看额度、订阅和消费数据。
+QuotaBall 是一个 Go/Wails 桌面版额度监控工具，用于在 Windows 桌面上查看 Krill AI 与 NewAPI 账号的额度、余额和使用情况。应用提供主面板、系统托盘和玻璃球浮窗，适合长期挂在桌面后台查看状态。
 
-## 功能
+## Features
 
-- 📊 **浮窗面板**：显示今日花费、钱包余额、请求数、剩余额度
-- 📋 **订阅详情**：每张订阅卡的额度进度条、剩余天数
-- 🔄 **自动刷新**：可配置刷新间隔（最小 3 秒）
-- 📌 **窗口置顶**：始终保持在最前
-- **玻璃球**：保留原有水位球显示，可切换当日 / 转结额度
-- 🔔 **托盘图标**：最小化到系统托盘，悬停显示摘要
+- **双登录模式**：支持 Krill AI 账号登录，也支持 NewAPI 通过 LinuxDo 授权登录。
+- **Krill AI 面板**：展示本周剩余、钱包余额、周额度、月总额度，以及每张套餐卡的周/月进度。
+- **NewAPI 面板**：展示当前余额、历史消耗、请求次数；NewAPI 没有固定总额度，玻璃球始终显示满水位。
+- **玻璃球浮窗**：Krill AI 模式下可点击切换周额度 / 月总额度；NewAPI 模式下显示余额数值。
+- **系统托盘**：支持后台运行、显示/隐藏主面板、手动刷新、退出程序。
+- **设置面板**：可配置刷新间隔、窗口置顶、记住登录状态和玻璃球显示。
+- **持久化保护**：配置文件使用原子写入，敏感登录信息通过本地 secret store 保存。
 
-## 快速开始
+## Screens
 
-### 构建
+- 主面板：集中展示当前账号的额度摘要和套餐详情。
+- 登录页：可切换 NewAPI、Sub2、Krill AI 登录方式；Sub2 入口保留但暂未开放。
+- 关于页：展示软件信息、作者、项目链接和 LinuxDo 社区入口。
 
-```bash
+## Build
+
+环境要求：
+
+- Windows
+- Go 1.25+
+
+一键构建：
+
+```bat
 build_go.bat
 ```
 
-构建完成后会生成 `dist\Krill-Monitor-Go.exe`，并复制一份到桌面。
+脚本会先执行测试，再生成：
 
-### 直接运行
+- `dist\QuotaBall.exe`
+- `%USERPROFILE%\Desktop\QuotaBall.exe`
 
-```bash
-go run .\cmd\krill-monitor
+手动构建：
+
+```powershell
+go test ./...
+go build -tags production -trimpath -ldflags "-H=windowsgui -s -w" -o .\dist\QuotaBall.exe .\cmd\quotaball
 ```
 
-## 配置
+开发运行：
 
-首次运行会自动生成 `config.json`，可以修改：
+```powershell
+go run .\cmd\quotaball
+```
+
+## Configuration
+
+首次运行会自动创建配置文件。常用字段：
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
-| `email` | 登录邮箱 | - |
-| `password` | 登录密码 | - |
-| `refresh_sec` | 刷新间隔（秒），最小 3 | 60 |
-| `opacity` | 窗口透明度 (0~1) | 0.96 |
-| `on_top` | 窗口置顶 | true |
-| `theme` | 主题 `light` / `dark` | light |
-| `tbar_enabled` | 显示玻璃球 | true |
-| `tbar_metric` | 玻璃球指标 `daily` / `forwarded` | daily |
+| `provider` | 当前登录方式：`krill` / `newapi` | `krill` |
+| `email` | Krill AI 登录邮箱 | 空 |
+| `newapi_base_url` | NewAPI 站点地址 | 空 |
+| `remember_login` | 是否记住登录状态 | `true` |
+| `refresh_sec` | 自动刷新间隔，最小 3 秒 | `60` |
+| `opacity` | 窗口透明度 | `0.96` |
+| `on_top` | 主窗口置顶 | `true` |
+| `theme` | 主题：`light` / `dark` | `light` |
+| `tbar_enabled` | Krill AI 模式下是否显示玻璃球 | `true` |
+| `tbar_metric` | Krill AI 玻璃球指标：`weekly` / `monthly` | `weekly` |
 
-也可以在浮窗右上角 ⚙ 按钮里直接修改。
+密码和 OAuth 会话不会以明文写入 `config.json`；保存配置时会清空明文密码字段。
 
-## 操作说明
+## Usage
 
-- **显示/隐藏浮窗**：双击托盘图标，或右键托盘 → "显示 / 隐藏"
-- **手动刷新**：点击浮窗右上角 ⟳ 按钮，或右键托盘 → "立即刷新"
-- **退出程序**：右键托盘 → "退出"
+- **打开设置**：点击主面板右上角齿轮按钮。
+- **查看关于页**：点击齿轮旁边的 `i` 按钮。
+- **手动刷新**：点击主面板右上角刷新按钮，或使用托盘菜单。
+- **显示/隐藏主面板**：双击托盘图标，或右键托盘选择显示 / 隐藏。
+- **退出程序**：右键托盘图标后选择退出。
+- **切换 Krill AI 玻璃球指标**：点击玻璃球中心，或使用玻璃球右键菜单。
+
+## Project Layout
+
+```text
+cmd\quotaball\                 # Windows GUI 程序入口
+internal\config\               # 配置加载、迁移、保存
+internal\krill\                # Krill AI API 与额度模型
+internal\newapi\               # NewAPI OAuth、用户信息与用量模型
+internal\secret\               # 本地 secret store
+internal\ui\                   # Windows 托盘、玻璃球和原生 UI
+internal\wailsui\              # Wails 主面板、前端资源和绑定
+```
+
+## Testing
+
+常规测试：
+
+```powershell
+go test ./...
+```
+
+覆盖率：
+
+```powershell
+go test -cover ./...
+```
+
+空白检查：
+
+```powershell
+git diff --check
+```
+
+
+## 🤝 Friends / Links
+
+<table border="0">
+  <tbody>
+    <tr>
+      <td width="200" align="center">
+        <a href="https://linux.do" target="_blank" style="text-decoration:none;">
+          <img src="https://img.shields.io/badge/LINUX.DO-Community-000000?style=for-the-badge&logo=linux&logoColor=white" alt="LINUX.DO" />
+        </a>
+      </td>
+      <td align="left">
+        <strong><a href="https://linux.do" target="_blank">LINUX.DO</a></strong><br/>
+        真诚、友善、团结、专业，共建你我引以为荣之社区。
+      </td>
+    </tr>
+  </tbody>
+</table>

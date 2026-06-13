@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/secret"
+	"quotaball/internal/config"
+	"quotaball/internal/secret"
 )
 
 type Service struct {
@@ -100,19 +100,24 @@ func (s *Service) Logout() {
 	}
 }
 
-func (s *Service) ClearSavedLogin() {
+func (s *Service) ClearSavedLogin() error {
 	s.mu.Lock()
+	s.authGen++
 	s.rememberLogin = false
 	s.legacyPassword = ""
 	s.configLoaded = true
 	s.mu.Unlock()
+	var err error
 	if s.Secrets != nil {
-		_ = s.Secrets.Set("token", "")
-		_ = s.Secrets.Set("password", "")
+		err = errors.Join(err, s.Secrets.Set("token", ""))
+		err = errors.Join(err, s.Secrets.Set("password", ""))
 	}
 	if s.LegacyTok != "" {
-		_ = os.Remove(s.LegacyTok)
+		if removeErr := os.Remove(s.LegacyTok); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, removeErr)
+		}
 	}
+	return err
 }
 
 func (s *Service) Fetch(ctx context.Context) (Snapshot, error) {

@@ -3,7 +3,7 @@ chcp 65001 >nul
 cd /d "%~dp0"
 
 echo ========================================
-echo   Krill AI 额度监控 - Go 构建工具
+echo   QuotaBall - Go 构建工具
 echo ========================================
 echo.
 
@@ -24,20 +24,20 @@ if %errorlevel% neq 0 (
 
 echo [2/2] 构建 Wails Windows GUI EXE...
 if not exist dist mkdir dist
-go build -tags production -trimpath -ldflags "-H=windowsgui -s -w" -o dist\Krill-Monitor-Go.exe .\cmd\krill-monitor
+go build -tags production -trimpath -ldflags "-H=windowsgui -s -w" -o dist\QuotaBall.exe .\cmd\quotaball
 if %errorlevel% neq 0 (
     echo [ERROR] 构建失败
     pause
     exit /b 1
 )
 
-copy /Y "dist\Krill-Monitor-Go.exe" "%USERPROFILE%\Desktop\Krill-Monitor-Go.exe" >nul 2>&1
+copy /Y "dist\QuotaBall.exe" "%USERPROFILE%\Desktop\QuotaBall.exe" >nul 2>&1
 
 echo.
 echo ========================================
 echo   构建完成
-echo   EXE: dist\Krill-Monitor-Go.exe
-echo   桌面副本: Krill-Monitor-Go.exe
+echo   EXE: dist\QuotaBall.exe
+echo   桌面副本: QuotaBall.exe
 echo ========================================
 echo.
 pause

@@ -17,16 +17,20 @@ import (
 	windowsOptions "github.com/wailsapp/wails/v2/pkg/options/windows"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
-	"krill_monitor/internal/config"
-	"krill_monitor/internal/krill"
-	"krill_monitor/internal/paths"
-	"krill_monitor/internal/secret"
-	"krill_monitor/internal/ui"
+	"quotaball/internal/config"
+	"quotaball/internal/krill"
+	"quotaball/internal/newapi"
+	"quotaball/internal/paths"
+	"quotaball/internal/secret"
+	"quotaball/internal/ui"
 )
 
 const (
-	panelWidth  = 540
-	panelHeight = 820
+	panelWidth        = 540
+	panelHeight       = 820
+	loginWindowWidth  = 446
+	loginWindowHeight = 486
+	appWindowTitle    = "QuotaBall"
 )
 
 //go:embed all:frontend/src
@@ -35,21 +39,24 @@ var assets embed.FS
 type App struct {
 	ctx context.Context
 
-	paths paths.Paths
-	cfg   config.Config
-	svc   *krill.Service
+	paths  paths.Paths
+	cfg    config.Config
+	svc    *krill.Service
+	newSvc *newapi.Service
 
-	mu         sync.Mutex
-	snap       krill.Snapshot
-	refreshing bool
-	visible    bool
-	quitting   bool
-	authGen    uint64
+	mu          sync.Mutex
+	snap        krill.Snapshot
+	operation   appOperation
+	operationID uint64
+	visible     bool
+	quitting    bool
+	authGen     uint64
 
 	stop     chan struct{}
 	commands chan appCommand
 	glass    *ui.GlassController
 	tray     *ui.TrayController
+	oauth    *oauthCapture
 }
 
 type appCommandKind int
@@ -66,21 +73,39 @@ type appCommand struct {
 	reveal bool
 }
 
+type appOperation int
+
+const (
+	operationIdle appOperation = iota
+	operationRefreshing
+	operationLoggingIn
+	operationOAuthStarting
+	operationOAuthCompleting
+)
+
+type appOperationToken struct {
+	id appOperationID
+	op appOperation
+}
+
+type appOperationID uint64
+
 func Run() error {
 	app, err := NewApp()
 	if err != nil {
 		return err
 	}
+	windowWidth, windowHeight := app.initialWindowSize()
 	frontend, err := fs.Sub(assets, "frontend/src")
 	if err != nil {
 		return err
 	}
 	return wails.Run(&options.App{
-		Title:             "Krill AI 额度监控",
-		Width:             panelWidth,
-		Height:            panelHeight,
-		MinWidth:          500,
-		MinHeight:         740,
+		Title:             appWindowTitle,
+		Width:             windowWidth,
+		Height:            windowHeight,
+		MinWidth:          loginWindowWidth,
+		MinHeight:         loginWindowHeight,
 		MaxWidth:          panelWidth,
 		MaxHeight:         panelHeight,
 		DisableResize:     true,
@@ -120,11 +145,7 @@ func NewApp() (*App, error) {
 		return nil, err
 	}
 	st := secret.NewStore(p.Secret)
-	if cfg.Password != "" {
-		_ = st.Set("password", cfg.Password)
-		cfg.Password = ""
-		_ = config.Save(p.Config, cfg)
-	}
+	cfg = migratePlaintextPassword(cfg, p.Config, st, config.Save)
 	app := &App{
 		paths:    p,
 		cfg:      cfg,
@@ -138,14 +159,40 @@ func NewApp() (*App, error) {
 		LegacyTok: p.LegacyTok,
 	}
 	app.svc.Configure(app.cfg)
+	app.newSvc = &newapi.Service{
+		Config:  &app.cfg,
+		Secrets: st,
+	}
+	app.newSvc.Configure(app.cfg)
 	app.snap = krill.EmptySnapshot("正在检查登录状态...")
-	if !app.svc.HasLoginState() {
-		app.snap = krill.EmptySnapshot("请登录 Krill AI")
+	app.snap.Provider = normalizeProvider(cfg.Provider)
+	if !app.hasLoginState() {
+		app.snap = krill.EmptySnapshot(app.loginRequiredMessage())
+		app.snap.Provider = normalizeProvider(cfg.Provider)
 	}
 	return app, nil
 }
 
+type secretSetter interface {
+	Set(key, value string) error
+}
+
+type configSaver func(string, config.Config) error
+
+func migratePlaintextPassword(cfg config.Config, configPath string, secrets secretSetter, save configSaver) config.Config {
+	if cfg.Password == "" || secrets == nil || save == nil {
+		return cfg
+	}
+	if err := secrets.Set("password", cfg.Password); err != nil {
+		return cfg
+	}
+	cfg.Password = ""
+	_ = save(configPath, cfg)
+	return cfg
+}
+
 func (a *App) startup(ctx context.Context) {
+	hasLogin := a.hasLoginState()
 	a.mu.Lock()
 	a.ctx = ctx
 	a.visible = true
@@ -153,14 +200,16 @@ func (a *App) startup(ctx context.Context) {
 	snap := a.snap
 	a.mu.Unlock()
 
-	a.positionWindow(ctx, cfg)
+	windowWidth, windowHeight := windowSizeForLoginState(hasLogin)
+	a.positionWindow(ctx, cfg, windowWidth, windowHeight)
+	a.syncWindowSize(windowWidth, windowHeight)
 	wailsruntime.WindowSetAlwaysOnTop(ctx, cfg.OnTop)
 	hideMainWindowFromTaskbar()
 	go a.commandLoop()
 	_ = a.ensureTrayController()
 	a.syncGlass(snap)
 	go a.scheduleLoop()
-	if a.svc.HasLoginState() {
+	if hasLogin {
 		go func() {
 			_, _ = a.refresh(false)
 		}()
@@ -188,12 +237,17 @@ func (a *App) shutdown() {
 	a.glass = nil
 	tray := a.tray
 	a.tray = nil
+	oauth := a.oauth
+	a.oauth = nil
 	a.mu.Unlock()
 	if glass != nil {
 		glass.Close()
 	}
 	if tray != nil {
 		tray.Close()
+	}
+	if oauth != nil {
+		oauth.Close()
 	}
 }
 
@@ -243,7 +297,7 @@ func (a *App) Bootstrap() (AppStateDTO, error) {
 	cfg := a.cfg
 	snap := a.snap
 	a.mu.Unlock()
-	hasSavedLogin := a.svc.HasSavedLoginState()
+	hasSavedLogin := a.hasSavedLoginState()
 	return AppStateDTO{
 		Config:   configDTO(cfg, hasSavedLogin),
 		Snapshot: snapshotDTO(snap),
@@ -258,20 +312,20 @@ func (a *App) Snapshot() (SnapshotDTO, error) {
 }
 
 func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
+	provider := normalizeProvider(req.Provider)
+	if provider != "" && provider != config.ProviderKrill {
+		return SnapshotDTO{}, errors.New("该登录方式不支持邮箱密码")
+	}
 	email := strings.TrimSpace(req.Email)
 	if email == "" || req.Password == "" {
 		return SnapshotDTO{}, errors.New("请输入邮箱和密码")
 	}
 
-	a.mu.Lock()
-	if a.refreshing {
-		a.mu.Unlock()
-		return SnapshotDTO{}, errors.New("正在刷新，请稍后")
+	op, authGen, err := a.beginAuthOperation(operationLoggingIn)
+	if err != nil {
+		return SnapshotDTO{}, err
 	}
-	a.refreshing = true
-	authGen := a.authGen
-	a.mu.Unlock()
-	defer a.setRefreshing(false)
+	defer a.finishOperation(op)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -283,6 +337,7 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 	}
 
 	a.mu.Lock()
+	a.cfg.Provider = config.ProviderKrill
 	a.cfg.Email = email
 	a.cfg.RememberLogin = req.RememberLogin
 	a.cfg.Password = ""
@@ -290,7 +345,7 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 	cfg := a.cfg
 	a.mu.Unlock()
 	a.svc.Configure(cfg)
-	err := config.Save(a.paths.Config, cfg)
+	err = config.Save(a.paths.Config, cfg)
 	if err != nil {
 		return SnapshotDTO{}, err
 	}
@@ -303,9 +358,157 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 	return snapshotDTO(snap), nil
 }
 
+func (a *App) StartNewAPIOAuth(req NewAPIOAuthStartRequest) (dto NewAPIOAuthStartDTO, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			oauthLogf("StartNewAPIOAuth panic: %v", recovered)
+			dto = NewAPIOAuthStartDTO{}
+			err = errors.New("NewAPI 登录启动异常，请重试")
+		}
+	}()
+	baseURL := strings.TrimSpace(req.BaseURL)
+	if baseURL == "" {
+		return NewAPIOAuthStartDTO{}, errors.New("请输入 NewAPI 网站地址")
+	}
+
+	op, _, err := a.beginAuthOperation(operationOAuthStarting)
+	if err != nil {
+		return NewAPIOAuthStartDTO{}, err
+	}
+	defer a.finishOperation(op)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var start newapi.OAuthStart
+	if req.AutoCallback {
+		start, err = a.newSvc.StartLinuxDoBrowser(ctx, baseURL, req.RememberLogin)
+	} else {
+		start, err = a.newSvc.StartLinuxDo(ctx, baseURL, req.RememberLogin)
+	}
+	if err != nil {
+		return NewAPIOAuthStartDTO{}, err
+	}
+
+	a.mu.Lock()
+	wailsCtx := a.ctx
+	a.mu.Unlock()
+	var capture *oauthCapture
+	if req.AutoCallback {
+		capture, err = startOAuthBrowserCapture(context.Background(), start.AuthorizeURL, start.BaseURL, start.LinuxDoClientID)
+		if err != nil {
+			return NewAPIOAuthStartDTO{}, err
+		}
+	}
+	if capture != nil {
+		a.replaceOAuthCapture(capture)
+		go a.waitNewAPIOAuthCallback(start.BaseURL, req.RememberLogin, capture)
+	} else if wailsCtx != nil {
+		wailsruntime.BrowserOpenURL(wailsCtx, start.AuthorizeURL)
+	}
+	return NewAPIOAuthStartDTO{
+		BaseURL:      start.BaseURL,
+		AuthorizeURL: start.AuthorizeURL,
+		AutoCapture:  capture != nil,
+	}, nil
+}
+
+func (a *App) CompleteNewAPIOAuth(req NewAPIOAuthCompleteRequest) (dto SnapshotDTO, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			oauthLogf("CompleteNewAPIOAuth panic: %v", recovered)
+			dto = SnapshotDTO{}
+			err = errors.New("NewAPI 登录完成异常，请重试")
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return a.completeNewAPIOAuth(ctx, req)
+}
+
+func (a *App) completeNewAPIOAuth(ctx context.Context, req NewAPIOAuthCompleteRequest) (SnapshotDTO, error) {
+	baseURL, err := newapi.NormalizeBaseURL(req.BaseURL)
+	if err != nil {
+		return SnapshotDTO{}, err
+	}
+	callbackURL := strings.TrimSpace(req.CallbackURL)
+	sessionCookies := strings.TrimSpace(req.SessionCookies)
+	accessToken := strings.TrimSpace(req.AccessToken)
+	userID := strings.TrimSpace(req.UserID)
+	if callbackURL == "" && sessionCookies == "" && accessToken == "" {
+		return SnapshotDTO{}, errors.New("请粘贴登录完成后的回调 URL")
+	}
+
+	op, authGen, err := a.beginAuthOperation(operationOAuthCompleting)
+	if err != nil {
+		return SnapshotDTO{}, err
+	}
+	defer a.finishOperation(op)
+
+	var snap krill.Snapshot
+	if accessToken != "" {
+		snap, err = a.newSvc.CompleteBrowserToken(ctx, baseURL, accessToken, userID, req.RememberLogin)
+	} else if callbackURL != "" && sessionCookies != "" {
+		snap, err = a.newSvc.CompleteLinuxDoWithCookies(ctx, baseURL, callbackURL, sessionCookies, req.RememberLogin)
+		if err != nil {
+			oauthLogf("browser callback completion failed, falling back to session cookies: %v", err)
+			snap, err = a.newSvc.CompleteBrowserSession(ctx, baseURL, sessionCookies, userID, req.RememberLogin)
+		}
+	} else if sessionCookies != "" {
+		snap, err = a.newSvc.CompleteBrowserSession(ctx, baseURL, sessionCookies, userID, req.RememberLogin)
+	} else {
+		snap, err = a.newSvc.CompleteLinuxDo(ctx, baseURL, callbackURL, req.RememberLogin)
+	}
+	if err != nil {
+		return SnapshotDTO{}, err
+	}
+	snap.Provider = config.ProviderNewAPI
+	if current, stale := a.snapshotIfAuthChanged(authGen); stale {
+		return snapshotDTO(current), krill.ErrAuthRequired
+	}
+
+	a.mu.Lock()
+	a.cfg.Provider = config.ProviderNewAPI
+	a.cfg.NewAPIBaseURL = baseURL
+	a.cfg.RememberLogin = req.RememberLogin
+	a.cfg.Password = ""
+	a.authGen++
+	cfg := a.cfg
+	oauth := a.oauth
+	a.oauth = nil
+	a.mu.Unlock()
+	if oauth != nil {
+		oauth.Close()
+	}
+	a.newSvc.Configure(cfg)
+	if err := config.Save(a.paths.Config, cfg); err != nil {
+		return SnapshotDTO{}, err
+	}
+	a.applySnapshot(snap, true)
+	return snapshotDTO(snap), nil
+}
+
+func (a *App) completeCapturedNewAPIOAuth(req NewAPIOAuthCompleteRequest) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	snap, err := a.completeNewAPIOAuth(ctx, req)
+	if err != nil {
+		oauthLogf("oauth backend completion failed: %v", err)
+		a.emitOAuthError(err.Error())
+		return
+	}
+	oauthLogf("oauth backend completion succeeded loggedIn=%t", snap.LoggedIn)
+}
+
 func (a *App) Logout() (SnapshotDTO, error) {
-	a.svc.Logout()
+	a.stopOAuthCapture()
+	provider := a.activeProvider()
+	if provider == config.ProviderNewAPI {
+		a.newSvc.Logout()
+	} else {
+		a.svc.Logout()
+	}
 	snap := krill.EmptySnapshot("已退出登录")
+	snap.Provider = provider
 	a.mu.Lock()
 	a.cfg.Password = ""
 	a.authGen++
@@ -316,6 +519,7 @@ func (a *App) Logout() (SnapshotDTO, error) {
 	tray := a.tray
 	a.mu.Unlock()
 	a.svc.Configure(cfg)
+	a.newSvc.Configure(cfg)
 	if glass != nil {
 		glass.Hide()
 		glass.SetSnapshot(snap)
@@ -323,8 +527,102 @@ func (a *App) Logout() (SnapshotDTO, error) {
 	if tray != nil {
 		tray.SetSnapshot(snap)
 	}
+	a.syncWindowForSnapshot(snap)
 	a.emitSnapshot(snap)
 	return snapshotDTO(snap), err
+}
+
+func (a *App) waitNewAPIOAuthCallback(baseURL string, remember bool, capture *oauthCapture) {
+	defer a.recoverOAuthCallbackPanic()
+	callback, ok := nextOAuthCallback(capture.Callbacks, capture.Done, a.stop)
+	if !ok {
+		a.emitOAuthError("NewAPI 自动登录窗口已关闭或连接中断，请重新打开 LinuxDo 登录页")
+		return
+	}
+	if !oauthCallbackHasCredential(callback) {
+		message := strings.TrimSpace(callback.Error)
+		if message == "" {
+			message = "NewAPI 自动登录窗口已关闭或连接中断，请重新打开 LinuxDo 登录页"
+		}
+		a.emitOAuthError(message)
+		return
+	}
+	req := NewAPIOAuthCompleteRequest{
+		BaseURL:        baseURL,
+		CallbackURL:    callback.CallbackURL,
+		SessionCookies: callback.SessionCookies,
+		AccessToken:    callback.AccessToken,
+		UserID:         callback.UserID,
+		RememberLogin:  remember,
+	}
+	oauthLogf(
+		"oauth callback captured callback=%t session=%t token=%t user=%t",
+		strings.TrimSpace(req.CallbackURL) != "",
+		strings.TrimSpace(req.SessionCookies) != "",
+		strings.TrimSpace(req.AccessToken) != "",
+		strings.TrimSpace(req.UserID) != "",
+	)
+	a.completeCapturedNewAPIOAuth(req)
+}
+
+func (a *App) recoverOAuthCallbackPanic() {
+	if recovered := recover(); recovered != nil {
+		a.emitOAuthError("NewAPI 自动登录异常，请重试")
+	}
+}
+
+func (a *App) emitOAuthCallbackToFrontend(req NewAPIOAuthCompleteRequest) {
+	a.mu.Lock()
+	ctx := a.ctx
+	a.mu.Unlock()
+	if ctx != nil {
+		wailsruntime.EventsEmit(ctx, "oauth:callback", req)
+	}
+}
+
+func nextOAuthCallback(callbacks <-chan oauthCallbackResult, done <-chan struct{}, appStop <-chan struct{}) (oauthCallbackResult, bool) {
+	select {
+	case callbackURL, ok := <-callbacks:
+		return callbackURL, ok
+	case <-done:
+		select {
+		case callbackURL, ok := <-callbacks:
+			return callbackURL, ok
+		default:
+			return oauthCallbackResult{}, false
+		}
+	case <-appStop:
+		return oauthCallbackResult{}, false
+	}
+}
+
+func (a *App) replaceOAuthCapture(capture *oauthCapture) {
+	a.mu.Lock()
+	old := a.oauth
+	a.oauth = capture
+	a.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+func (a *App) stopOAuthCapture() {
+	a.mu.Lock()
+	oauth := a.oauth
+	a.oauth = nil
+	a.mu.Unlock()
+	if oauth != nil {
+		oauth.Close()
+	}
+}
+
+func (a *App) emitOAuthError(message string) {
+	a.mu.Lock()
+	ctx := a.ctx
+	a.mu.Unlock()
+	if ctx != nil {
+		wailsruntime.EventsEmit(ctx, "oauth:error", message)
+	}
 }
 
 func (a *App) Refresh() (SnapshotDTO, error) {
@@ -335,33 +633,54 @@ func (a *App) Settings() (PublicConfigDTO, error) {
 	a.mu.Lock()
 	cfg := a.cfg
 	a.mu.Unlock()
-	hasSavedLogin := a.svc.HasSavedLoginState()
+	hasSavedLogin := a.hasSavedLoginState()
 	return configDTO(cfg, hasSavedLogin), nil
 }
 
 func (a *App) SaveSettings(req SettingsRequest) (PublicConfigDTO, error) {
 	a.mu.Lock()
-	a.cfg.RefreshSec = clampInt(req.RefreshSec, 3, 3600)
-	a.cfg.OnTop = req.OnTop
-	a.cfg.TbarEnabled = req.GlassEnabled
-	a.cfg.RememberLogin = req.RememberLogin
-	a.cfg.Password = ""
 	cfg := a.cfg
+	oldProvider := a.cfg.Provider
+	oldNewAPIBaseURL := a.cfg.NewAPIBaseURL
+	oldRememberLogin := a.cfg.RememberLogin
+	cfg.RefreshSec = clampInt(req.RefreshSec, 3, 3600)
+	cfg.OnTop = req.OnTop
+	cfg.RememberLogin = req.RememberLogin
+	if provider := normalizeProvider(req.Provider); provider == config.ProviderKrill || provider == config.ProviderNewAPI {
+		cfg.Provider = provider
+	}
+	if cfg.Provider != config.ProviderNewAPI {
+		cfg.TbarEnabled = req.GlassEnabled
+	}
+	if strings.TrimSpace(req.NewAPIBaseURL) != "" {
+		cfg.NewAPIBaseURL = strings.TrimRight(strings.TrimSpace(req.NewAPIBaseURL), "/")
+	}
+	if cfg.Provider != oldProvider || cfg.NewAPIBaseURL != oldNewAPIBaseURL || cfg.RememberLogin != oldRememberLogin {
+		a.authGen++
+	}
 	ctx := a.ctx
 	a.mu.Unlock()
-	a.svc.Configure(cfg)
-	if !cfg.RememberLogin {
-		a.svc.ClearSavedLogin()
-	}
+
+	cfg.Password = ""
 	err := config.Save(a.paths.Config, cfg)
 	if err != nil {
 		return PublicConfigDTO{}, err
+	}
+	a.mu.Lock()
+	a.cfg = cfg
+	a.mu.Unlock()
+	a.svc.Configure(cfg)
+	a.newSvc.Configure(cfg)
+	if !cfg.RememberLogin {
+		if err := errors.Join(a.svc.ClearSavedLogin(), a.newSvc.ClearSavedLogin()); err != nil {
+			return PublicConfigDTO{}, err
+		}
 	}
 	if ctx != nil {
 		wailsruntime.WindowSetAlwaysOnTop(ctx, cfg.OnTop)
 	}
 	a.syncGlassCurrent()
-	hasSavedLogin := a.svc.HasSavedLoginState()
+	hasSavedLogin := a.hasSavedLoginState()
 	return configDTO(cfg, hasSavedLogin), nil
 }
 
@@ -395,6 +714,17 @@ func (a *App) HidePanel() error {
 }
 
 func (a *App) ShowPanel() error {
+	if !a.hasLoginState() {
+		snap := krill.EmptySnapshot(a.loginRequiredMessage())
+		a.mu.Lock()
+		a.snap = snap
+		a.mu.Unlock()
+		a.syncWindowForSnapshot(snap)
+		a.syncGlass(snap)
+		a.syncTray(snap)
+		a.emitSnapshot(snap)
+	}
+
 	a.mu.Lock()
 	if a.quitting {
 		a.mu.Unlock()
@@ -445,22 +775,18 @@ func (a *App) Quit() error {
 }
 
 func (a *App) refresh(reveal bool) (SnapshotDTO, error) {
-	a.mu.Lock()
-	if a.refreshing {
-		snap := a.snap
-		a.mu.Unlock()
+	op, snap, authGen, ok := a.beginRefreshOperation()
+	if !ok {
 		return snapshotDTO(snap), nil
 	}
-	a.refreshing = true
-	authGen := a.authGen
-	a.mu.Unlock()
-	defer a.setRefreshing(false)
+	defer a.finishOperation(op)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	snap, err := a.fetch(ctx)
-	if err != nil && errors.Is(err, krill.ErrAuthRequired) {
-		snap = krill.EmptySnapshot("请登录 Krill AI")
+	if err != nil && (errors.Is(err, krill.ErrAuthRequired) || errors.Is(err, newapi.ErrAuthRequired)) {
+		snap = krill.EmptySnapshot(a.loginRequiredMessage())
+		snap.Provider = a.activeProvider()
 	}
 	if current, stale := a.snapshotIfAuthChanged(authGen); stale {
 		return snapshotDTO(current), nil
@@ -479,7 +805,17 @@ func (a *App) snapshotIfAuthChanged(gen uint64) (krill.Snapshot, bool) {
 }
 
 func (a *App) fetch(ctx context.Context) (krill.Snapshot, error) {
-	snap, err := a.svc.Fetch(ctx)
+	var snap krill.Snapshot
+	var err error
+	provider := a.activeProvider()
+	if provider == config.ProviderNewAPI {
+		snap, err = a.newSvc.Fetch(ctx)
+	} else {
+		snap, err = a.svc.Fetch(ctx)
+	}
+	if snap.Provider == "" {
+		snap.Provider = provider
+	}
 	if snap.Email == "" {
 		a.mu.Lock()
 		snap.Email = a.cfg.Email
@@ -497,6 +833,7 @@ func (a *App) applySnapshot(snap krill.Snapshot, reveal bool) {
 	a.snap = snap
 	ctx := a.ctx
 	a.mu.Unlock()
+	a.syncWindowForSnapshot(snap)
 	a.syncGlass(snap)
 	a.syncTray(snap)
 	a.emitSnapshot(snap)
@@ -529,12 +866,96 @@ func (a *App) scheduleLoop() {
 		a.mu.Unlock()
 		select {
 		case <-time.After(time.Duration(refreshSec) * time.Second):
-			if a.svc.HasLoginState() {
+			if a.hasLoginState() {
 				_, _ = a.refresh(false)
 			}
 		case <-a.stop:
 			return
 		}
+	}
+}
+
+func (a *App) initialWindowSize() (int, int) {
+	if a.hasLoginState() {
+		return panelWidth, panelHeight
+	}
+	a.mu.Lock()
+	snap := a.snap
+	a.mu.Unlock()
+	return windowSizeForSnapshot(snap)
+}
+
+func windowSizeForSnapshot(snap krill.Snapshot) (int, int) {
+	return windowSizeForLoginState(snap.LoggedIn)
+}
+
+func windowSizeForLoginState(loggedIn bool) (int, int) {
+	if loggedIn {
+		return panelWidth, panelHeight
+	}
+	return loginWindowWidth, loginWindowHeight
+}
+
+func (a *App) syncWindowForSnapshot(snap krill.Snapshot) {
+	a.syncWindowSize(windowSizeForSnapshot(snap))
+}
+
+func (a *App) syncWindowSize(width, height int) {
+	a.mu.Lock()
+	ctx := a.ctx
+	a.mu.Unlock()
+	if ctx == nil {
+		return
+	}
+	x, y := wailsruntime.WindowGetPosition(ctx)
+	wailsruntime.WindowSetSize(ctx, width, height)
+	screenW := int(win.GetSystemMetrics(win.SM_CXSCREEN))
+	screenH := int(win.GetSystemMetrics(win.SM_CYSCREEN))
+	nextX := clampInt(x, 14, maxInt(14, screenW-width-14))
+	nextY := clampInt(y, 14, maxInt(14, screenH-height-14))
+	if nextX != x || nextY != y {
+		wailsruntime.WindowSetPosition(ctx, nextX, nextY)
+	}
+}
+
+func (a *App) activeProvider() string {
+	a.mu.Lock()
+	provider := a.cfg.Provider
+	a.mu.Unlock()
+	return normalizeProvider(provider)
+}
+
+func (a *App) hasLoginState() bool {
+	if a.activeProvider() == config.ProviderNewAPI {
+		return a.newSvc.HasLoginState()
+	}
+	return a.svc.HasLoginState()
+}
+
+func (a *App) hasSavedLoginState() bool {
+	if a.activeProvider() == config.ProviderNewAPI {
+		return a.newSvc.HasSavedLoginState()
+	}
+	return a.svc.HasSavedLoginState()
+}
+
+func (a *App) loginRequiredMessage() string {
+	if a.activeProvider() == config.ProviderNewAPI {
+		return "请登录 NewAPI"
+	}
+	return "请登录 Krill AI"
+}
+
+func normalizeProvider(provider string) string {
+	switch provider {
+	case "", config.ProviderKrill:
+		return config.ProviderKrill
+	case config.ProviderNewAPI:
+		return config.ProviderNewAPI
+	case config.ProviderSub2:
+		return config.ProviderSub2
+	default:
+		return config.ProviderKrill
 	}
 }
 
@@ -660,7 +1081,7 @@ func (a *App) syncGlass(snap krill.Snapshot) {
 		}
 		return
 	}
-	show := enabled && snap.LoggedIn
+	show := snap.LoggedIn && (snap.Provider == config.ProviderNewAPI || enabled)
 	if show && glass == nil {
 		_ = a.ensureGlassController()
 		a.mu.Lock()
@@ -678,10 +1099,48 @@ func (a *App) syncGlass(snap krill.Snapshot) {
 	}
 }
 
-func (a *App) setRefreshing(v bool) {
+func (a *App) beginRefreshOperation() (appOperationToken, krill.Snapshot, uint64, bool) {
 	a.mu.Lock()
-	a.refreshing = v
+	defer a.mu.Unlock()
+	if a.operation != operationIdle {
+		return appOperationToken{}, a.snap, a.authGen, false
+	}
+	a.operationID++
+	a.operation = operationRefreshing
+	token := appOperationToken{id: appOperationID(a.operationID), op: operationRefreshing}
+	return token, a.snap, a.authGen, true
+}
+
+func (a *App) beginAuthOperation(op appOperation) (appOperationToken, uint64, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.operation != operationIdle && a.operation != operationRefreshing {
+		return appOperationToken{}, 0, errors.New(a.operation.busyMessage())
+	}
+	a.operationID++
+	a.operation = op
+	a.authGen++
+	token := appOperationToken{id: appOperationID(a.operationID), op: op}
+	return token, a.authGen, nil
+}
+
+func (a *App) finishOperation(token appOperationToken) {
+	a.mu.Lock()
+	if appOperationID(a.operationID) == token.id && a.operation == token.op {
+		a.operation = operationIdle
+	}
 	a.mu.Unlock()
+}
+
+func (op appOperation) busyMessage() string {
+	switch op {
+	case operationLoggingIn, operationOAuthStarting, operationOAuthCompleting:
+		return "正在登录，请稍后"
+	case operationRefreshing:
+		return "正在刷新，请稍后"
+	default:
+		return "操作进行中，请稍后"
+	}
 }
 
 func (a *App) isQuitting() bool {
@@ -701,8 +1160,8 @@ func (a *App) saveWindowPosition(ctx context.Context) error {
 	return err
 }
 
-func (a *App) positionWindow(ctx context.Context, cfg config.Config) {
-	x := int(win.GetSystemMetrics(win.SM_CXSCREEN)) - panelWidth - 24
+func (a *App) positionWindow(ctx context.Context, cfg config.Config, width int, height int) {
+	x := int(win.GetSystemMetrics(win.SM_CXSCREEN)) - width - 24
 	y := 70
 	if cfg.WX != nil && cfg.WY != nil {
 		x = *cfg.WX
@@ -710,8 +1169,8 @@ func (a *App) positionWindow(ctx context.Context, cfg config.Config) {
 	}
 	screenW := int(win.GetSystemMetrics(win.SM_CXSCREEN))
 	screenH := int(win.GetSystemMetrics(win.SM_CYSCREEN))
-	x = clampInt(x, 14, maxInt(14, screenW-panelWidth-14))
-	y = clampInt(y, 14, maxInt(14, screenH-panelHeight-14))
+	x = clampInt(x, 14, maxInt(14, screenW-width-14))
+	y = clampInt(y, 14, maxInt(14, screenH-height-14))
 	wailsruntime.WindowSetPosition(ctx, x, y)
 }
 

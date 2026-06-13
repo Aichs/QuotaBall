@@ -5,14 +5,13 @@ package ui
 import (
 	"errors"
 	"fmt"
-	"math"
 	"runtime"
 	"sync"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 
-	"krill_monitor/internal/krill"
+	"quotaball/internal/krill"
 )
 
 type TrayControllerOptions struct {
@@ -57,7 +56,7 @@ func (c *TrayController) run() {
 	var host *walk.MainWindow
 	if err := (MainWindow{
 		AssignTo: &host,
-		Title:    "Krill AI",
+		Title:    "QuotaBall",
 		Size:     Size{Width: 1, Height: 1},
 		Layout:   VBox{MarginsZero: true},
 	}).Create(); err != nil {
@@ -85,7 +84,7 @@ func (c *TrayController) run() {
 		c.ready <- err
 		return
 	}
-	if err := notify.SetToolTip("Krill AI"); err != nil {
+	if err := notify.SetToolTip("QuotaBall"); err != nil {
 		_ = notify.Dispose()
 		host.Dispose()
 		c.ready <- err
@@ -196,10 +195,13 @@ func (c *TrayController) quit() {
 
 func trayTooltip(s krill.Snapshot) string {
 	if s.OK {
-		return fmt.Sprintf("Krill AI - 剩余 $%.2f / 今日 $%.2f", math.Max(0, s.RemainingDaily()), s.Spend)
+		if s.Provider == "newapi" {
+			return fmt.Sprintf("QuotaBall - 余额 $%.2f / 消耗 $%.2f", s.Wallet, s.Spend)
+		}
+		return fmt.Sprintf("QuotaBall - 周剩余 $%.2f / 已用 $%.2f", s.RemainingWeekly(), s.Spend)
 	}
 	if s.Err != "" {
-		return "Krill AI - " + s.Err
+		return "QuotaBall - " + s.Err
 	}
-	return "Krill AI"
+	return "QuotaBall"
 }
