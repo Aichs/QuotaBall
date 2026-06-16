@@ -134,6 +134,25 @@ func TestFrontendNewAPISettingsHideGlassToggle(t *testing.T) {
 	}
 }
 
+func TestFrontendSettingsExposeCodexFastProxySwitch(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	for _, want := range []string{
+		`codexFastProxyEnabled: false`,
+		`name="codexFastProxyEnabled"`,
+		`Codex Fast 代理`,
+		`codexFastProxyEnabled: form.get("codexFastProxyEnabled") === "on"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("frontend settings must include %q", want)
+		}
+	}
+}
+
 func TestFrontendHeaderExposesAboutButtonNextToSettings(t *testing.T) {
 	raw, err := os.ReadFile("frontend/src/main.js")
 	if err != nil {

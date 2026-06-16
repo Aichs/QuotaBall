@@ -200,6 +200,92 @@ func TestSaveSettingsIgnoresGlassToggleForNewAPIProvider(t *testing.T) {
 	}
 }
 
+func TestSaveSettingsAppliesCodexFastProxyToggle(t *testing.T) {
+	oldApply := applyCodexFastProxy
+	var calls []bool
+	applyCodexFastProxy = func(_ context.Context, enabled bool) error {
+		calls = append(calls, enabled)
+		return nil
+	}
+	defer func() { applyCodexFastProxy = oldApply }()
+
+	cfg := config.Default()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	app := &App{
+		paths:  paths.Paths{Config: configPath},
+		cfg:    cfg,
+		svc:    &krill.Service{},
+		newSvc: &newapi.Service{},
+	}
+
+	got, err := app.SaveSettings(SettingsRequest{
+		RefreshSec:            cfg.RefreshSec,
+		OnTop:                 cfg.OnTop,
+		GlassEnabled:          cfg.TbarEnabled,
+		RememberLogin:         cfg.RememberLogin,
+		Provider:              config.ProviderKrill,
+		CodexFastProxyEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || !calls[0] {
+		t.Fatalf("applyCodexFastProxy calls = %#v, want [true]", calls)
+	}
+	if !app.cfg.CodexFastProxyEnabled || !got.CodexFastProxyEnabled {
+		t.Fatalf("Codex Fast proxy switch was not committed, cfg=%t dto=%t", app.cfg.CodexFastProxyEnabled, got.CodexFastProxyEnabled)
+	}
+	saved, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saved.CodexFastProxyEnabled {
+		t.Fatalf("saved CodexFastProxyEnabled = false, want true")
+	}
+}
+
+func TestSaveSettingsRollsBackCodexFastProxyConfigWhenApplyFails(t *testing.T) {
+	oldApply := applyCodexFastProxy
+	applyCodexFastProxy = func(context.Context, bool) error {
+		return errors.New("proxy failed")
+	}
+	defer func() { applyCodexFastProxy = oldApply }()
+
+	cfg := config.Default()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		paths:  paths.Paths{Config: configPath},
+		cfg:    cfg,
+		svc:    &krill.Service{},
+		newSvc: &newapi.Service{},
+	}
+
+	_, err := app.SaveSettings(SettingsRequest{
+		RefreshSec:            cfg.RefreshSec,
+		OnTop:                 cfg.OnTop,
+		GlassEnabled:          cfg.TbarEnabled,
+		RememberLogin:         cfg.RememberLogin,
+		Provider:              config.ProviderKrill,
+		CodexFastProxyEnabled: true,
+	})
+	if err == nil {
+		t.Fatal("SaveSettings should return proxy apply error")
+	}
+	if app.cfg.CodexFastProxyEnabled {
+		t.Fatal("SaveSettings should not commit Codex Fast switch after apply failure")
+	}
+	saved, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.CodexFastProxyEnabled {
+		t.Fatal("SaveSettings should roll back persisted Codex Fast switch after apply failure")
+	}
+}
+
 func TestSaveSettingsDoesNotCommitOrClearSavedLoginWhenConfigSaveFails(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")

@@ -43,30 +43,32 @@ type NewAPIOAuthCompleteRequest struct {
 }
 
 type SettingsRequest struct {
-	RefreshSec    int    `json:"refreshSec"`
-	OnTop         bool   `json:"onTop"`
-	GlassEnabled  bool   `json:"glassEnabled"`
-	RememberLogin bool   `json:"rememberLogin"`
-	Provider      string `json:"provider"`
-	NewAPIBaseURL string `json:"newapiBaseUrl"`
+	RefreshSec            int    `json:"refreshSec"`
+	OnTop                 bool   `json:"onTop"`
+	GlassEnabled          bool   `json:"glassEnabled"`
+	RememberLogin         bool   `json:"rememberLogin"`
+	Provider              string `json:"provider"`
+	NewAPIBaseURL         string `json:"newapiBaseUrl"`
+	CodexFastProxyEnabled bool   `json:"codexFastProxyEnabled"`
 }
 
 type PublicConfigDTO struct {
-	Email         string  `json:"email"`
-	Provider      string  `json:"provider"`
-	NewAPIBaseURL string  `json:"newapiBaseUrl"`
-	RememberLogin bool    `json:"rememberLogin"`
-	RefreshSec    int     `json:"refreshSec"`
-	Opacity       float64 `json:"opacity"`
-	OnTop         bool    `json:"onTop"`
-	Theme         string  `json:"theme"`
-	WindowX       *int    `json:"windowX,omitempty"`
-	WindowY       *int    `json:"windowY,omitempty"`
-	GlassX        *int    `json:"glassX,omitempty"`
-	GlassY        *int    `json:"glassY,omitempty"`
-	GlassEnabled  bool    `json:"glassEnabled"`
-	GlassMetric   string  `json:"glassMetric"`
-	HasSavedLogin bool    `json:"hasSavedLogin"`
+	Email                 string  `json:"email"`
+	Provider              string  `json:"provider"`
+	NewAPIBaseURL         string  `json:"newapiBaseUrl"`
+	RememberLogin         bool    `json:"rememberLogin"`
+	RefreshSec            int     `json:"refreshSec"`
+	Opacity               float64 `json:"opacity"`
+	OnTop                 bool    `json:"onTop"`
+	Theme                 string  `json:"theme"`
+	WindowX               *int    `json:"windowX,omitempty"`
+	WindowY               *int    `json:"windowY,omitempty"`
+	GlassX                *int    `json:"glassX,omitempty"`
+	GlassY                *int    `json:"glassY,omitempty"`
+	GlassEnabled          bool    `json:"glassEnabled"`
+	GlassMetric           string  `json:"glassMetric"`
+	HasSavedLogin         bool    `json:"hasSavedLogin"`
+	CodexFastProxyEnabled bool    `json:"codexFastProxyEnabled"`
 }
 
 type SnapshotDTO struct {
@@ -137,21 +139,22 @@ type SubscriptionDTO struct {
 func configDTO(cfg config.Config, hasSavedLogin bool) PublicConfigDTO {
 	cfg.Normalize()
 	return PublicConfigDTO{
-		Email:         cfg.Email,
-		Provider:      cfg.Provider,
-		NewAPIBaseURL: cfg.NewAPIBaseURL,
-		RememberLogin: cfg.RememberLogin,
-		RefreshSec:    cfg.RefreshSec,
-		Opacity:       cfg.Opacity,
-		OnTop:         cfg.OnTop,
-		Theme:         cfg.Theme,
-		WindowX:       cloneInt(cfg.WX),
-		WindowY:       cloneInt(cfg.WY),
-		GlassX:        cloneInt(cfg.TbarX),
-		GlassY:        cloneInt(cfg.TbarY),
-		GlassEnabled:  cfg.TbarEnabled,
-		GlassMetric:   cfg.TbarMetric,
-		HasSavedLogin: hasSavedLogin,
+		Email:                 cfg.Email,
+		Provider:              cfg.Provider,
+		NewAPIBaseURL:         cfg.NewAPIBaseURL,
+		RememberLogin:         cfg.RememberLogin,
+		RefreshSec:            cfg.RefreshSec,
+		Opacity:               cfg.Opacity,
+		OnTop:                 cfg.OnTop,
+		Theme:                 cfg.Theme,
+		WindowX:               cloneInt(cfg.WX),
+		WindowY:               cloneInt(cfg.WY),
+		GlassX:                cloneInt(cfg.TbarX),
+		GlassY:                cloneInt(cfg.TbarY),
+		GlassEnabled:          cfg.TbarEnabled,
+		GlassMetric:           cfg.TbarMetric,
+		HasSavedLogin:         hasSavedLogin,
+		CodexFastProxyEnabled: cfg.CodexFastProxyEnabled,
 	}
 }
 

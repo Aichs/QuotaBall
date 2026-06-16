@@ -8,6 +8,7 @@ const state = {
     refreshSec: 60,
     onTop: true,
     glassEnabled: true,
+    codexFastProxyEnabled: false,
   },
   snapshot: {
     provider: "krill",
@@ -458,7 +459,7 @@ function renderSettings() {
     <div class="modal">
       <form class="dialog settings" data-form="settings">
         <div class="dialog-shell">
-          <div class="dots">${renderDialogDots(360, 320)}</div>
+          <div class="dots">${renderDialogDots(360, 350)}</div>
           <div class="dialog-content">
             <div class="dialog-title">设置</div>
             <div class="number-field">
@@ -468,6 +469,7 @@ function renderSettings() {
             <label class="check"><input type="checkbox" name="onTop" ${cfg.onTop ? "checked" : ""} />窗口置顶</label>
             ${showGlass ? `<label class="check"><input type="checkbox" name="glassEnabled" ${cfg.glassEnabled ? "checked" : ""} />显示玻璃球</label>` : ""}
             <label class="check"><input type="checkbox" name="remember" ${cfg.rememberLogin ? "checked" : ""} />记住登录状态</label>
+            <label class="check"><input type="checkbox" name="codexFastProxyEnabled" ${cfg.codexFastProxyEnabled ? "checked" : ""} />Codex Fast 代理</label>
             <div class="dialog-buttons">
               <button class="secondary" type="button" data-action="cancel-modal">取消</button>
               <button class="primary" type="submit">保存</button>
@@ -847,6 +849,7 @@ async function onSettings(event) {
     rememberLogin: form.get("remember") === "on",
     provider: state.config.provider || "krill",
     newapiBaseUrl: state.config.newapiBaseUrl || "",
+    codexFastProxyEnabled: form.get("codexFastProxyEnabled") === "on",
   };
   try {
     const cfg = await backend().SaveSettings(payload);

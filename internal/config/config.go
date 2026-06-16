@@ -21,21 +21,22 @@ const (
 )
 
 type Config struct {
-	Email         string  `json:"email"`
-	Password      string  `json:"password"`
-	Provider      string  `json:"provider"`
-	NewAPIBaseURL string  `json:"newapi_base_url"`
-	RememberLogin bool    `json:"remember_login"`
-	RefreshSec    int     `json:"refresh_sec"`
-	Opacity       float64 `json:"opacity"`
-	OnTop         bool    `json:"on_top"`
-	Theme         string  `json:"theme"`
-	WX            *int    `json:"wx"`
-	WY            *int    `json:"wy"`
-	TbarX         *int    `json:"tbar_x"`
-	TbarY         *int    `json:"tbar_y"`
-	TbarEnabled   bool    `json:"tbar_enabled"`
-	TbarMetric    string  `json:"tbar_metric"`
+	Email                 string  `json:"email"`
+	Password              string  `json:"password"`
+	Provider              string  `json:"provider"`
+	NewAPIBaseURL         string  `json:"newapi_base_url"`
+	RememberLogin         bool    `json:"remember_login"`
+	RefreshSec            int     `json:"refresh_sec"`
+	Opacity               float64 `json:"opacity"`
+	OnTop                 bool    `json:"on_top"`
+	Theme                 string  `json:"theme"`
+	WX                    *int    `json:"wx"`
+	WY                    *int    `json:"wy"`
+	TbarX                 *int    `json:"tbar_x"`
+	TbarY                 *int    `json:"tbar_y"`
+	TbarEnabled           bool    `json:"tbar_enabled"`
+	TbarMetric            string  `json:"tbar_metric"`
+	CodexFastProxyEnabled bool    `json:"codex_fast_proxy_enabled"`
 }
 
 func Default() Config {

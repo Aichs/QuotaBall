@@ -55,8 +55,25 @@ func TestLoadMissingFileReturnsDefaultsAndCreatesParentSafeConfig(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if cfg.RefreshSec != 60 || !cfg.RememberLogin || cfg.Theme != "light" || !cfg.TbarEnabled {
+	if cfg.RefreshSec != 60 || !cfg.RememberLogin || cfg.Theme != "light" || !cfg.TbarEnabled || cfg.CodexFastProxyEnabled {
 		t.Fatalf("unexpected defaults: %#v", cfg)
+	}
+}
+
+func TestSaveLoadKeepsCodexFastProxySwitch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Default()
+	cfg.CodexFastProxyEnabled = true
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.CodexFastProxyEnabled {
+		t.Fatalf("CodexFastProxyEnabled = false, want true")
 	}
 }
 

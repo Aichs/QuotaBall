@@ -17,6 +17,7 @@ import (
 	windowsOptions "github.com/wailsapp/wails/v2/pkg/options/windows"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"quotaball/internal/codexfast"
 	"quotaball/internal/config"
 	"quotaball/internal/krill"
 	"quotaball/internal/newapi"
@@ -35,6 +36,11 @@ const (
 
 //go:embed all:frontend/src
 var assets embed.FS
+
+var (
+	applyCodexFastProxy  = codexfast.Apply
+	detectCodexFastProxy = codexfast.DetectEnabled
+)
 
 type App struct {
 	ctx context.Context
@@ -146,6 +152,9 @@ func NewApp() (*App, error) {
 	}
 	st := secret.NewStore(p.Secret)
 	cfg = migratePlaintextPassword(cfg, p.Config, st, config.Save)
+	if enabled, err := detectCodexFastProxy(); err == nil {
+		cfg.CodexFastProxyEnabled = enabled
+	}
 	app := &App{
 		paths:    p,
 		cfg:      cfg,
@@ -639,13 +648,16 @@ func (a *App) Settings() (PublicConfigDTO, error) {
 
 func (a *App) SaveSettings(req SettingsRequest) (PublicConfigDTO, error) {
 	a.mu.Lock()
+	oldCfg := a.cfg
 	cfg := a.cfg
 	oldProvider := a.cfg.Provider
 	oldNewAPIBaseURL := a.cfg.NewAPIBaseURL
 	oldRememberLogin := a.cfg.RememberLogin
+	oldCodexFastProxyEnabled := a.cfg.CodexFastProxyEnabled
 	cfg.RefreshSec = clampInt(req.RefreshSec, 3, 3600)
 	cfg.OnTop = req.OnTop
 	cfg.RememberLogin = req.RememberLogin
+	cfg.CodexFastProxyEnabled = req.CodexFastProxyEnabled
 	if provider := normalizeProvider(req.Provider); provider == config.ProviderKrill || provider == config.ProviderNewAPI {
 		cfg.Provider = provider
 	}
@@ -665,6 +677,14 @@ func (a *App) SaveSettings(req SettingsRequest) (PublicConfigDTO, error) {
 	err := config.Save(a.paths.Config, cfg)
 	if err != nil {
 		return PublicConfigDTO{}, err
+	}
+	if cfg.CodexFastProxyEnabled != oldCodexFastProxyEnabled {
+		proxyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := applyCodexFastProxy(proxyCtx, cfg.CodexFastProxyEnabled); err != nil {
+			_ = config.Save(a.paths.Config, oldCfg)
+			return PublicConfigDTO{}, err
+		}
 	}
 	a.mu.Lock()
 	a.cfg = cfg

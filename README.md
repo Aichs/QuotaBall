@@ -9,7 +9,8 @@ QuotaBall 是一个 Go/Wails 桌面版额度监控工具，用于在 Windows 桌
 - **NewAPI 面板**：展示当前余额、历史消耗、请求次数；NewAPI 没有固定总额度，玻璃球始终显示满水位。
 - **玻璃球浮窗**：Krill AI 模式下可点击切换周额度 / 月总额度；NewAPI 模式下显示余额数值。
 - **系统托盘**：支持后台运行、显示/隐藏主面板、手动刷新、退出程序。
-- **设置面板**：可配置刷新间隔、窗口置顶、记住登录状态和玻璃球显示。
+- **设置面板**：可配置刷新间隔、窗口置顶、记住登录状态、玻璃球显示和 Codex Fast 代理。
+- **Codex Fast 代理**：可一键为 Codex Desktop 切换本地代理，自动注入第三方 API 需要的 Fast 请求参数。
 - **持久化保护**：配置文件使用原子写入，敏感登录信息通过本地 secret store 保存。
 
 ## Screens
@@ -65,8 +66,11 @@ go run .\cmd\quotaball
 | `theme` | 主题：`light` / `dark` | `light` |
 | `tbar_enabled` | Krill AI 模式下是否显示玻璃球 | `true` |
 | `tbar_metric` | Krill AI 玻璃球指标：`weekly` / `monthly` | `weekly` |
+| `codex_fast_proxy_enabled` | 是否启用 Codex Fast 本地代理开关 | `false` |
 
 密码和 OAuth 会话不会以明文写入 `config.json`；保存配置时会清空明文密码字段。
+
+Codex Fast 代理开关会更新当前用户的 `~/.codex/config.toml`，把 Codex 的第三方 API 地址切到本地代理或恢复为直连 Krill AI API。启用时会部署并启动 `~/.codex/fast-proxy` 下的 Node 代理，同时注册当前用户的开机启动项；关闭时会停止代理并移除该启动项。切换后需要重启 Codex Desktop 或新开 Codex 会话，确保 Codex 重新读取配置。
 
 ## Usage
 
@@ -76,6 +80,7 @@ go run .\cmd\quotaball
 - **显示/隐藏主面板**：双击托盘图标，或右键托盘选择显示 / 隐藏。
 - **退出程序**：右键托盘图标后选择退出。
 - **切换 Krill AI 玻璃球指标**：点击玻璃球中心，或使用玻璃球右键菜单。
+- **切换 Codex Fast 代理**：打开设置，勾选或取消 `Codex Fast 代理` 后保存，再重启 Codex Desktop 或新开 Codex 会话。
 
 ## Project Layout
 
@@ -87,6 +92,7 @@ internal\newapi\               # NewAPI OAuth、用户信息与用量模型
 internal\secret\               # 本地 secret store
 internal\ui\                   # Windows 托盘、玻璃球和原生 UI
 internal\wailsui\              # Wails 主面板、前端资源和绑定
+internal\codexfast\            # Codex Fast 本地代理部署、配置和进程管理
 ```
 
 ## Testing
