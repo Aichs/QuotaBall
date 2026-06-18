@@ -18,6 +18,7 @@ import (
 	"quotaball/internal/newapi"
 	"quotaball/internal/paths"
 	"quotaball/internal/secret"
+	"quotaball/internal/sub2"
 )
 
 func TestStartNewAPIOAuthDoesNotPersistProviderBeforeCompletion(t *testing.T) {
@@ -147,7 +148,7 @@ func TestStartNewAPIOAuthStartsAutomaticCallbackWithBrowserSessionStrategy(t *te
 	_ = stateValue
 }
 
-func TestSaveSettingsDoesNotActivateSub2Placeholder(t *testing.T) {
+func TestSaveSettingsActivatesSub2Provider(t *testing.T) {
 	cfg := config.Default()
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	app := &App{
@@ -155,6 +156,7 @@ func TestSaveSettingsDoesNotActivateSub2Placeholder(t *testing.T) {
 		cfg:    cfg,
 		svc:    &krill.Service{},
 		newSvc: &newapi.Service{},
+		subSvc: &sub2.Service{},
 	}
 
 	got, err := app.SaveSettings(SettingsRequest{
@@ -163,12 +165,147 @@ func TestSaveSettingsDoesNotActivateSub2Placeholder(t *testing.T) {
 		GlassEnabled:  cfg.TbarEnabled,
 		RememberLogin: cfg.RememberLogin,
 		Provider:      config.ProviderSub2,
+		Sub2BaseURL:   "https://sub2.example.test",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Provider != config.ProviderKrill || app.cfg.Provider != config.ProviderKrill {
-		t.Fatalf("Sub2 placeholder must not become active provider, dto=%q cfg=%q", got.Provider, app.cfg.Provider)
+	if got.Provider != config.ProviderSub2 || app.cfg.Provider != config.ProviderSub2 {
+		t.Fatalf("Sub2 provider must become active, dto=%q cfg=%q", got.Provider, app.cfg.Provider)
+	}
+	if got.Sub2BaseURL != "https://sub2.example.test" || app.cfg.Sub2BaseURL != "https://sub2.example.test" {
+		t.Fatalf("Sub2 base URL not saved, dto=%q cfg=%q", got.Sub2BaseURL, app.cfg.Sub2BaseURL)
+	}
+}
+
+func TestLoginSupportsSub2EmailPasswordProvider(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/login":
+			writeSub2WailsAPITestResponse(t, w, map[string]any{
+				"access_token":  "access-token",
+				"refresh_token": "refresh-token",
+				"expires_in":    3600,
+				"token_type":    "Bearer",
+				"user": map[string]any{
+					"id":      7,
+					"email":   "sub2@example.test",
+					"balance": 8.5,
+				},
+			})
+		case "/api/v1/auth/me":
+			if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
+				t.Fatalf("Authorization = %q, want bearer token", got)
+			}
+			writeSub2WailsAPITestResponse(t, w, map[string]any{
+				"id":      7,
+				"email":   "sub2@example.test",
+				"balance": 8.5,
+			})
+		case "/api/v1/subscriptions/summary":
+			writeSub2WailsAPITestResponse(t, w, map[string]any{
+				"active_count":   1,
+				"total_used_usd": 1500,
+				"subscriptions": []any{
+					map[string]any{
+						"id":                11,
+						"group_name":        "Pro",
+						"daily_used_usd":    25,
+						"daily_limit_usd":   100,
+						"weekly_used_usd":   140,
+						"weekly_limit_usd":  700,
+						"monthly_used_usd":  1500,
+						"monthly_limit_usd": 3000,
+					},
+				},
+			})
+		case "/api/v1/subscriptions/progress":
+			writeSub2WailsAPITestResponse(t, w, []any{
+				map[string]any{
+					"subscription": map[string]any{
+						"id":         11,
+						"starts_at":  "2026-06-18T12:00:00Z",
+						"expires_at": "2026-07-18T12:00:00Z",
+						"group": map[string]any{
+							"name":     "Pro",
+							"platform": "openai",
+						},
+					},
+					"progress": map[string]any{
+						"subscription_id": 11,
+						"daily": map[string]any{
+							"used_usd":      "25",
+							"limit_usd":     "100",
+							"remaining_usd": "75",
+							"percentage":    25,
+						},
+						"weekly": map[string]any{
+							"used_usd":      "140",
+							"limit_usd":     "700",
+							"remaining_usd": "560",
+							"percentage":    20,
+						},
+						"monthly": map[string]any{
+							"used_usd":      "1500",
+							"limit_usd":     "3000",
+							"remaining_usd": "1500",
+							"percentage":    50,
+						},
+						"expires_at":     "2026-07-18T12:00:00Z",
+						"days_remaining": 30,
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	configPath := filepath.Join(dir, "config.json")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	secretStore := secret.NewStore(filepath.Join(dir, "secrets.json"))
+	app := &App{
+		paths: paths.Paths{Config: configPath},
+		cfg:   cfg,
+		svc:   &krill.Service{},
+	}
+	app.newSvc = &newapi.Service{Config: &app.cfg, Secrets: secretStore}
+	app.subSvc = &sub2.Service{Config: &app.cfg, Secrets: secretStore}
+	app.subSvc.Configure(app.cfg)
+
+	snap, err := app.Login(LoginRequest{
+		Provider:      config.ProviderSub2,
+		BaseURL:       server.URL + "/api/v1",
+		Email:         "sub2@example.test",
+		Password:      "secret",
+		RememberLogin: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.LoggedIn || snap.Provider != config.ProviderSub2 || snap.Wallet != 8.5 {
+		t.Fatalf("Sub2 login snapshot = %#v", snap)
+	}
+	if snap.Summary.TotalDailyQuotaUSD != 100 || snap.Summary.TotalWeeklyQuotaUSD != 700 || snap.Summary.TotalMonthlyQuotaUSD != 3000 {
+		t.Fatalf("Sub2 quota summary = %#v", snap.Summary)
+	}
+	if len(snap.Subscriptions) != 1 || snap.Subscriptions[0].DailyRemaining != 75 || snap.Subscriptions[0].WeeklyRemaining != 560 || snap.Subscriptions[0].MonthlyRemaining != 1500 {
+		t.Fatalf("Sub2 subscription progress = %#v", snap.Subscriptions)
+	}
+	if app.cfg.Provider != config.ProviderSub2 || app.cfg.Sub2BaseURL != server.URL || app.cfg.Sub2Email != "sub2@example.test" {
+		t.Fatalf("app cfg after Sub2 login = %#v", app.cfg)
+	}
+	saved, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Provider != config.ProviderSub2 || saved.Sub2BaseURL != server.URL || saved.Sub2Email != "sub2@example.test" {
+		t.Fatalf("saved cfg after Sub2 login = %#v", saved)
 	}
 }
 
@@ -606,6 +743,14 @@ func writeKrillAPITestResponse(t *testing.T, w http.ResponseWriter, data any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeSub2WailsAPITestResponse(t *testing.T, w http.ResponseWriter, data any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]any{"code": 0, "message": "ok", "data": data}); err != nil {
 		t.Fatal(err)
 	}
 }

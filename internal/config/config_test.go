@@ -95,15 +95,17 @@ func TestLoadAcceptsUTF8BOMConfig(t *testing.T) {
 	}
 }
 
-func TestNormalizeAllowsMonthlyGlassMetricAndMapsLegacyValues(t *testing.T) {
-	cfg := Default()
-	cfg.TbarMetric = "monthly"
-	cfg.Normalize()
-	if cfg.TbarMetric != "monthly" {
-		t.Fatalf("TbarMetric = %q, want monthly", cfg.TbarMetric)
+func TestNormalizeAllowsDailyAndMonthlyGlassMetricAndMapsLegacyValues(t *testing.T) {
+	for _, metric := range []string{"daily", "monthly"} {
+		cfg := Default()
+		cfg.TbarMetric = metric
+		cfg.Normalize()
+		if cfg.TbarMetric != metric {
+			t.Fatalf("TbarMetric = %q, want %q", cfg.TbarMetric, metric)
+		}
 	}
 
-	for _, legacy := range []string{"daily", "forwarded", "bad-value", ""} {
+	for _, legacy := range []string{"forwarded", "bad-value", ""} {
 		cfg := Default()
 		cfg.TbarMetric = legacy
 		cfg.Normalize()

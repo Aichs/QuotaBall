@@ -27,6 +27,7 @@ const (
 	ballSize           = 190
 	ballAnimationStep  = 0.24
 	ballDragThreshold  = 8
+	glassMetricDaily   = "daily"
 	glassMetricWeekly  = "weekly"
 	glassMetricMonthly = "monthly"
 )
@@ -121,7 +122,7 @@ func (g *glassBall) installMenu() {
 		metric bool
 	}{
 		{"显示/隐藏面板", g.host.togglePanel, false},
-		{"切换周/月水位", g.toggleMetric, true},
+		{"切换额度水位", g.toggleMetric, true},
 		{"立即刷新", func() { g.host.refresh(true) }, false},
 		{"退出", g.host.quit, false},
 	} {
@@ -212,12 +213,12 @@ func (g *glassBall) activeSub() (krill.Subscription, bool) {
 
 func activeSubFromSnapshot(snap krill.Snapshot) (krill.Subscription, bool) {
 	for _, s := range snap.Subscriptions {
-		if firstPositive(s.WeeklyRemaining, s.DailyRemaining) > 0.0001 {
+		if firstPositive(s.DailyRemaining, s.WeeklyRemaining, s.MonthlyRemaining) > 0.0001 {
 			return s, true
 		}
 	}
 	for _, s := range snap.Subscriptions {
-		if firstPositive(s.WeeklyLimit, s.DailyLimit) > 0.0001 {
+		if firstPositive(s.DailyLimit, s.WeeklyLimit, s.MonthlyLimit) > 0.0001 {
 			return s, true
 		}
 	}
@@ -230,7 +231,7 @@ func activeSubFromSnapshot(snap krill.Snapshot) (krill.Subscription, bool) {
 func (g *glassBall) metricState() glassMetricState {
 	g.mu.Lock()
 	snap := g.snap
-	mode := normalizedGlassMetric(g.mode)
+	mode := normalizedGlassMetricForProvider(snap.Provider, g.mode)
 	g.mu.Unlock()
 	if !snap.OK {
 		return glassMetricState{mode: mode}
@@ -249,6 +250,16 @@ func (g *glassBall) metricState() glassMetricState {
 	sub, has := activeSubFromSnapshot(snap)
 	if !has {
 		return glassMetricState{mode: mode}
+	}
+	if snap.Provider == config.ProviderSub2 {
+		switch mode {
+		case glassMetricDaily:
+			return sub2MetricState("每日额度", glassMetricDaily, sub.DailyUsed, sub.DailyLimit, sub.DailyPercent)
+		case glassMetricMonthly:
+			return sub2MetricState("每月额度", glassMetricMonthly, sub.MonthlyUsed, sub.MonthlyLimit, sub.MonthlyPercent)
+		default:
+			return sub2MetricState("每周额度", glassMetricWeekly, sub.WeeklyUsed, sub.WeeklyLimit, sub.WeeklyPercent)
+		}
 	}
 	if mode == glassMetricMonthly {
 		limit := firstPositive(sub.MonthlyLimit, sub.WeeklyLimit, sub.DailyLimit)
@@ -273,6 +284,22 @@ func (g *glassBall) metricState() glassMetricState {
 		limit:      firstPositive(sub.WeeklyLimit, sub.DailyLimit),
 		centerText: centerPercentText(pct),
 		mode:       glassMetricWeekly,
+		togglable:  true,
+		ok:         true,
+	}
+}
+
+func sub2MetricState(label, mode string, used, limit, pct float64) glassMetricState {
+	if pct == 0 {
+		pct = quotaPercent(used, limit)
+	}
+	return glassMetricState{
+		label:      label,
+		pct:        pct,
+		used:       used,
+		limit:      limit,
+		centerText: centerPercentText(pct),
+		mode:       mode,
 		togglable:  true,
 		ok:         true,
 	}
@@ -441,7 +468,8 @@ func (g *glassBall) toggleMetric() {
 	if !g.metricToggleAllowed() {
 		return
 	}
-	g.mode = nextGlassMetric(g.mode)
+	provider := g.currentProvider()
+	g.mode = nextGlassMetricForProvider(provider, g.mode)
 	g.host.mutateGlassConfig(func(cfg *config.Config) {
 		cfg.TbarMetric = g.mode
 	})
@@ -458,10 +486,14 @@ func (g *glassBall) syncMetricAction() {
 }
 
 func (g *glassBall) metricToggleAllowed() bool {
+	return g.currentProvider() != config.ProviderNewAPI
+}
+
+func (g *glassBall) currentProvider() string {
 	g.mu.Lock()
 	provider := g.snap.Provider
 	g.mu.Unlock()
-	return provider != config.ProviderNewAPI
+	return provider
 }
 
 func (g *glassBall) savePos() {
@@ -557,11 +589,28 @@ func monthlyWaterPalette() waterPalette {
 	}
 }
 
-func waterPaletteForMode(mode string) waterPalette {
-	if normalizedGlassMetric(mode) == glassMetricMonthly {
-		return monthlyWaterPalette()
+func dailyWaterPalette() waterPalette {
+	palette := weeklyWaterPalette()
+	palette.vertical = []colorStop{
+		{0.0, color.RGBA{61, 170, 238, 202}},
+		{0.42, color.RGBA{105, 211, 255, 222}},
+		{0.76, color.RGBA{161, 235, 255, 236}},
+		{1.0, color.RGBA{220, 250, 255, 242}},
 	}
-	return weeklyWaterPalette()
+	palette.surfaceShade = color.RGBA{38, 149, 210, 78}
+	palette.arcShade = color.RGBA{44, 142, 205, 38}
+	return palette
+}
+
+func waterPaletteForMode(mode string) waterPalette {
+	switch normalizedGlassMetric(mode) {
+	case glassMetricDaily:
+		return dailyWaterPalette()
+	case glassMetricMonthly:
+		return monthlyWaterPalette()
+	default:
+		return weeklyWaterPalette()
+	}
 }
 
 func renderBallImage(pct float64, ok bool, phase float64) image.Image {
@@ -958,6 +1007,23 @@ func transparentKeyColor() color.RGBA {
 }
 
 func normalizedGlassMetric(mode string) string {
+	if mode == glassMetricDaily {
+		return glassMetricDaily
+	}
+	if mode == glassMetricMonthly {
+		return glassMetricMonthly
+	}
+	return glassMetricWeekly
+}
+
+func normalizedGlassMetricForProvider(provider, mode string) string {
+	if provider == config.ProviderNewAPI {
+		return glassMetricWeekly
+	}
+	mode = normalizedGlassMetric(mode)
+	if provider == config.ProviderSub2 {
+		return mode
+	}
 	if mode == glassMetricMonthly {
 		return glassMetricMonthly
 	}
@@ -969,6 +1035,21 @@ func nextGlassMetric(mode string) string {
 		return glassMetricMonthly
 	}
 	return glassMetricWeekly
+}
+
+func nextGlassMetricForProvider(provider, mode string) string {
+	mode = normalizedGlassMetricForProvider(provider, mode)
+	if provider != config.ProviderSub2 {
+		return nextGlassMetric(mode)
+	}
+	switch mode {
+	case glassMetricDaily:
+		return glassMetricWeekly
+	case glassMetricWeekly:
+		return glassMetricMonthly
+	default:
+		return glassMetricDaily
+	}
 }
 
 func ballCenter(r ballFloatRect) (float64, float64) {

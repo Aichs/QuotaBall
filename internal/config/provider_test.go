@@ -37,10 +37,10 @@ func TestLoadNormalizesUnknownProviderToKrill(t *testing.T) {
 	}
 }
 
-func TestLoadNormalizesSub2PlaceholderToKrill(t *testing.T) {
+func TestLoadAllowsSub2Provider(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{"provider":"sub2"}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"provider":"sub2","sub2_base_url":"https://sub2.example.test/api/v1/","sub2_email":" user@example.test "}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,8 +49,14 @@ func TestLoadNormalizesSub2PlaceholderToKrill(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cfg.Provider != ProviderKrill {
-		t.Fatalf("Provider = %q, want %q while Sub2 is only a placeholder", cfg.Provider, ProviderKrill)
+	if cfg.Provider != ProviderSub2 {
+		t.Fatalf("Provider = %q, want %q", cfg.Provider, ProviderSub2)
+	}
+	if cfg.Sub2BaseURL != "https://sub2.example.test/api/v1" {
+		t.Fatalf("Sub2BaseURL = %q, want normalized base URL", cfg.Sub2BaseURL)
+	}
+	if cfg.Sub2Email != "user@example.test" {
+		t.Fatalf("Sub2Email = %q, want trimmed email", cfg.Sub2Email)
 	}
 }
 

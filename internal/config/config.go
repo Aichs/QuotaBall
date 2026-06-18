@@ -25,6 +25,8 @@ type Config struct {
 	Password              string  `json:"password"`
 	Provider              string  `json:"provider"`
 	NewAPIBaseURL         string  `json:"newapi_base_url"`
+	Sub2BaseURL           string  `json:"sub2_base_url"`
+	Sub2Email             string  `json:"sub2_email"`
 	RememberLogin         bool    `json:"remember_login"`
 	RefreshSec            int     `json:"refresh_sec"`
 	Opacity               float64 `json:"opacity"`
@@ -92,11 +94,13 @@ func Save(path string, cfg Config) error {
 
 func (c *Config) Normalize() {
 	switch c.Provider {
-	case ProviderKrill, ProviderNewAPI:
+	case ProviderKrill, ProviderNewAPI, ProviderSub2:
 	default:
 		c.Provider = ProviderKrill
 	}
 	c.NewAPIBaseURL = normalizeBaseURL(c.NewAPIBaseURL)
+	c.Sub2BaseURL = normalizeBaseURL(c.Sub2BaseURL)
+	c.Sub2Email = strings.TrimSpace(c.Sub2Email)
 	if c.RefreshSec < 3 {
 		c.RefreshSec = 3
 	}
@@ -107,7 +111,7 @@ func (c *Config) Normalize() {
 		c.Theme = ThemeLight
 	}
 	switch c.TbarMetric {
-	case "monthly":
+	case "daily", "monthly":
 	default:
 		c.TbarMetric = "weekly"
 	}

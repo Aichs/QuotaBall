@@ -243,7 +243,10 @@ func RestoreCodexConfig(raw, proxyBaseURL, originalBaseURL string) (string, erro
 	if current != proxyBaseURL {
 		return raw, nil
 	}
-	return updateModelProviderBaseURL(raw, provider, originalBaseURL), nil
+	out := updateModelProviderBaseURL(raw, provider, originalBaseURL)
+	out = updateTableBool(out, "features", "fast_mode", false)
+	out = updateTableBool(out, "notice", "fast_default_opt_out", true)
+	return out, nil
 }
 
 func activeProvider(raw string) string {

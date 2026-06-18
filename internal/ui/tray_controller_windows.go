@@ -11,6 +11,7 @@ import (
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 
+	"quotaball/internal/config"
 	"quotaball/internal/krill"
 )
 
@@ -195,8 +196,11 @@ func (c *TrayController) quit() {
 
 func trayTooltip(s krill.Snapshot) string {
 	if s.OK {
-		if s.Provider == "newapi" {
+		if s.Provider == config.ProviderNewAPI {
 			return fmt.Sprintf("QuotaBall - 余额 $%.2f / 消耗 $%.2f", s.Wallet, s.Spend)
+		}
+		if s.Provider == config.ProviderSub2 {
+			return fmt.Sprintf("QuotaBall - 余额 $%.2f / 本月剩余 $%.2f", s.Wallet, s.Summary.TotalMonthlyRemainingUSD)
 		}
 		return fmt.Sprintf("QuotaBall - 周剩余 $%.2f / 已用 $%.2f", s.RemainingWeekly(), s.Spend)
 	}

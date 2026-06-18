@@ -55,3 +55,34 @@ func TestPanelStatCardsKeepKrillWeeklyMonthlyQuota(t *testing.T) {
 		t.Fatalf("Krill panel card labels changed: %+v", cards)
 	}
 }
+
+func TestPanelStatCardsUseSub2BalanceDailyWeeklyMonthlyQuota(t *testing.T) {
+	cards := panelStatCards(krill.Snapshot{
+		Provider: config.ProviderSub2,
+		Wallet:   8.5,
+		Summary: krill.Summary{
+			TotalDailyQuotaUSD:       100,
+			TotalDailyUsedUSD:        25,
+			TotalDailyRemainingUSD:   75,
+			TotalWeeklyQuotaUSD:      700,
+			TotalWeeklyUsedUSD:       140,
+			TotalWeeklyRemainingUSD:  560,
+			TotalMonthlyQuotaUSD:     3000,
+			TotalMonthlyUsedUSD:      1500,
+			TotalMonthlyRemainingUSD: 1500,
+		},
+	})
+
+	if len(cards) != 4 {
+		t.Fatalf("Sub2 panel cards = %d, want 4", len(cards))
+	}
+	want := []string{"账户余额", "今日剩余", "本周剩余", "本月剩余"}
+	for i, title := range want {
+		if cards[i].title != title {
+			t.Fatalf("card %d title = %q, want %q", i, cards[i].title, title)
+		}
+	}
+	if cards[1].value != "$75.00" || cards[2].value != "$560.00" || cards[3].value != "$1,500.00" {
+		t.Fatalf("Sub2 remaining values = %#v", cards)
+	}
+}

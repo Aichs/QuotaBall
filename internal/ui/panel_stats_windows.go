@@ -27,6 +27,23 @@ func panelStatCards(s krill.Snapshot) []panelStatCard {
 			{"请求次数", panelNonEmpty(s.Req, "-"), "累计请求数", walk.RGB(49, 223, 154)},
 		}
 	}
+	if s.Provider == config.ProviderSub2 {
+		dailyQuota := s.Summary.TotalDailyQuotaUSD
+		dailyRemaining := s.Summary.TotalDailyRemainingUSD
+		dailyUsed := firstPositive(s.Summary.TotalDailyUsedUSD, math.Max(0, dailyQuota-dailyRemaining))
+		weeklyQuota := s.Summary.TotalWeeklyQuotaUSD
+		weeklyRemaining := s.Summary.TotalWeeklyRemainingUSD
+		weeklyUsed := firstPositive(s.Summary.TotalWeeklyUsedUSD, math.Max(0, weeklyQuota-weeklyRemaining))
+		monthlyQuota := s.Summary.TotalMonthlyQuotaUSD
+		monthlyRemaining := s.Summary.TotalMonthlyRemainingUSD
+		monthlyUsed := firstPositive(s.Summary.TotalMonthlyUsedUSD, math.Max(0, monthlyQuota-monthlyRemaining))
+		return []panelStatCard{
+			{"账户余额", panelMoney(s.Wallet, 2), "Sub2 账户余额", walk.RGB(40, 184, 255)},
+			{"今日剩余", panelMoney(dailyRemaining, 2), fmt.Sprintf("已用 %s / 总计 %s", panelMoney(dailyUsed, 2), panelMoney(dailyQuota, 2)), walk.RGB(255, 173, 47)},
+			{"本周剩余", panelMoney(weeklyRemaining, 2), fmt.Sprintf("已用 %s / 总计 %s", panelMoney(weeklyUsed, 2), panelMoney(weeklyQuota, 2)), walk.RGB(49, 223, 154)},
+			{"本月剩余", panelMoney(monthlyRemaining, 2), fmt.Sprintf("已用 %s / 总计 %s", panelMoney(monthlyUsed, 2), panelMoney(monthlyQuota, 2)), walk.RGB(255, 127, 138)},
+		}
+	}
 
 	weeklyQuota := firstPositive(s.Summary.TotalWeeklyQuotaUSD, s.Summary.TotalDailyQuotaUSD)
 	weeklyRemaining := firstPositive(s.Summary.TotalWeeklyRemainingUSD, s.Summary.TotalRemainingUSD, math.Max(0, weeklyQuota-s.Spend))

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"quotaball/internal/config"
 	"quotaball/internal/krill"
 )
 
@@ -41,6 +42,21 @@ func TestTrayTooltipUsesNewAPIBalanceInsteadOfWeeklyQuota(t *testing.T) {
 		Spend:    0.2,
 	})
 	want := "QuotaBall - 余额 $1.80 / 消耗 $0.20"
+	if got != want {
+		t.Fatalf("trayTooltip = %q, want %q", got, want)
+	}
+}
+
+func TestTrayTooltipUsesSub2BalanceAndMonthlyRemaining(t *testing.T) {
+	got := trayTooltip(krill.Snapshot{
+		Provider: config.ProviderSub2,
+		OK:       true,
+		Wallet:   8.5,
+		Summary: krill.Summary{
+			TotalMonthlyRemainingUSD: 1500,
+		},
+	})
+	want := "QuotaBall - 余额 $8.50 / 本月剩余 $1500.00"
 	if got != want {
 		t.Fatalf("trayTooltip = %q, want %q", got, want)
 	}

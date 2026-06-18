@@ -3,6 +3,8 @@ const state = {
     provider: "krill",
     email: "",
     newapiBaseUrl: "",
+    sub2BaseUrl: "",
+    sub2Email: "",
     newapiAutoCallback: true,
     rememberLogin: true,
     refreshSec: 60,
@@ -114,11 +116,18 @@ function statCards(snapshot) {
   if (isNewAPIProvider(snapshot)) {
     return newAPIStatCards(snapshot);
   }
+  if (isSub2Provider(snapshot)) {
+    return sub2StatCards(snapshot);
+  }
   return krillStatCards(snapshot);
 }
 
 function isNewAPIProvider(snapshot) {
   return text(snapshot?.provider || state.config.provider || "krill") === "newapi";
+}
+
+function isSub2Provider(snapshot) {
+  return text(snapshot?.provider || state.config.provider || "krill") === "sub2";
 }
 
 function newAPIStatCards(snapshot) {
@@ -209,8 +218,35 @@ function renderLoggedOut(_s) {
   return `
     <main class="root login-root">
       ${renderLogin(false)}
+      ${state.modal && state.modal !== "login" ? renderModal() : ""}
     </main>
   `;
+}
+
+function sub2StatCards(snapshot) {
+  const summary = snapshot.summary || {};
+  return [
+    {
+      title: "账户余额",
+      value: money(snapshot.wallet, 2),
+      sub: "Sub2 账户余额",
+      color: "#28b8ff",
+    },
+    sub2QuotaCard("今日剩余", summary.totalDailyRemainingUsd, summary.totalDailyUsedUsd, summary.totalDailyQuotaUsd, "#ffad2f"),
+    sub2QuotaCard("本周剩余", summary.totalWeeklyRemainingUsd, summary.totalWeeklyUsedUsd, summary.totalWeeklyQuotaUsd, "#31df9a"),
+    sub2QuotaCard("本月剩余", summary.totalMonthlyRemainingUsd, summary.totalMonthlyUsedUsd, summary.totalMonthlyQuotaUsd, "#ff7f8a"),
+  ];
+}
+
+function sub2QuotaCard(title, remaining, used, limit, color) {
+  const quota = coalescedNumber(limit);
+  const spent = coalescedNumber(used, Math.max(0, quota - coalescedNumber(remaining)));
+  return {
+    title,
+    value: money(remaining, 2),
+    sub: `已用 ${money(spent, 2)} / 总计 ${money(quota, 2)}`,
+    color,
+  };
 }
 
 function renderMainPanel(s) {
@@ -223,7 +259,7 @@ function renderMainPanel(s) {
           ${renderHeader(s)}
           <div class="error">${escapeHTML(s.err || "")}</div>
           ${renderStats(s)}
-          ${isNewAPIProvider(s) ? "" : renderSubscriptionSection(subs)}
+          ${isNewAPIProvider(s) ? "" : renderSubscriptionSection(subs, s)}
         </div>
       </section>
       ${renderModal()}
@@ -231,16 +267,17 @@ function renderMainPanel(s) {
   `;
 }
 
-function renderSubscriptionSection(subs) {
+function renderSubscriptionSection(subs, snapshot) {
+  const sub2 = isSub2Provider(snapshot);
   return `
     <div class="section-row">
-      <div class="section-title">套餐</div>
-      <div class="muted">${subs.length} 张</div>
+      <div class="section-title">${sub2 ? "我的订阅" : "套餐"}</div>
+      <div class="muted">${subs.length} ${sub2 ? "个" : "张"}</div>
       <div class="spacer"></div>
     </div>
     <div class="scroll">
       <div class="subs">
-        ${subs.length ? subs.map(renderSub).join("") : `<div class="empty"></div>`}
+        ${subs.length ? subs.map((sub) => renderSub(sub, snapshot)).join("") : `<div class="empty"></div>`}
       </div>
     </div>
   `;
@@ -279,9 +316,10 @@ function renderStats(s) {
   `;
 }
 
-function renderSub(sub) {
+function renderSub(sub, snapshot) {
   const routes = Array.isArray(sub.routes) ? sub.routes.slice(0, 6) : [];
-  const quota = subQuota(sub);
+  const quota = subQuota(sub, snapshot);
+  const sub2 = isSub2Provider(snapshot);
   return `
     <section class="sub-card">
       <div class="sub-top">
@@ -290,18 +328,25 @@ function renderSub(sub) {
       </div>
       <div class="sub-detail">#${escapeHTML(sub.id)}  ·  ${escapeHTML(sub.start)} → ${escapeHTML(sub.end)}</div>
       ${routes.length ? `<div class="routes">${routes.map((route) => `<span class="route">${escapeHTML(route)}</span>`).join("")}</div>` : ""}
-      ${renderQuota("周额度", quota.weeklyUsed, quota.weeklyLimit, quota.weeklyPercent)}
-      ${renderQuota("月总额度", quota.monthlyUsed, quota.monthlyLimit, quota.monthlyPercent)}
+      ${sub2 ? renderQuota("每日额度", quota.dailyUsed, quota.dailyLimit, quota.dailyPercent) : ""}
+      ${renderQuota(sub2 ? "每周额度" : "周额度", quota.weeklyUsed, quota.weeklyLimit, quota.weeklyPercent)}
+      ${renderQuota(sub2 ? "每月额度" : "月总额度", quota.monthlyUsed, quota.monthlyLimit, quota.monthlyPercent)}
     </section>
   `;
 }
 
-function subQuota(sub) {
-  const weeklyLimit = coalescedNumber(sub.weeklyLimit, sub.dailyLimit);
-  const weeklyUsed = coalescedNumber(sub.weeklyUsed, sub.dailyUsed);
-  const monthlyLimit = coalescedNumber(sub.monthlyLimit, weeklyLimit);
-  const monthlyUsed = coalescedNumber(sub.monthlyUsed, weeklyUsed);
+function subQuota(sub, snapshot) {
+  const sub2 = isSub2Provider(snapshot);
+  const dailyLimit = coalescedNumber(sub.dailyLimit);
+  const dailyUsed = coalescedNumber(sub.dailyUsed);
+  const weeklyLimit = sub2 ? coalescedNumber(sub.weeklyLimit) : coalescedNumber(sub.weeklyLimit, sub.dailyLimit);
+  const weeklyUsed = sub2 ? coalescedNumber(sub.weeklyUsed) : coalescedNumber(sub.weeklyUsed, sub.dailyUsed);
+  const monthlyLimit = sub2 ? coalescedNumber(sub.monthlyLimit) : coalescedNumber(sub.monthlyLimit, weeklyLimit);
+  const monthlyUsed = sub2 ? coalescedNumber(sub.monthlyUsed) : coalescedNumber(sub.monthlyUsed, weeklyUsed);
   return {
+    dailyLimit,
+    dailyUsed,
+    dailyPercent: coalescedNumber(sub.dailyPercent, dailyLimit > 0 ? (dailyUsed / dailyLimit) * 100 : 0),
     weeklyLimit,
     weeklyUsed,
     weeklyPercent: coalescedNumber(sub.weeklyPercent, weeklyLimit > 0 ? (weeklyUsed / weeklyLimit) * 100 : 0),
@@ -353,6 +398,7 @@ function renderLogin(asModal = true) {
               <div class="subtitle">额度监控</div>
             </div>
             <div class="spacer"></div>
+            <button class="icon-btn" type="button" data-action="settings" title="设置">⚙</button>
           </div>
           <div class="glass-line"></div>
           ${renderProviderTabs(provider)}
@@ -388,6 +434,15 @@ function loggedOutSnapshotError(provider) {
     return "";
   }
   if (provider === "krill" && err === "请登录 NewAPI") {
+    return "";
+  }
+  if (provider !== "sub2" && err === "请登录 Sub2") {
+    return "";
+  }
+  if (provider !== "newapi" && err === "请登录 NewAPI") {
+    return "";
+  }
+  if (provider !== "krill" && err === "请登录 Krill AI") {
     return "";
   }
   return err;
@@ -428,7 +483,9 @@ function renderProviderLoginFields(provider) {
   }
   if (provider === "sub2") {
     return `
-      <div class="provider-placeholder">Sub2 支持暂未开放</div>
+      <input class="field" name="sub2BaseUrl" autocomplete="url" placeholder="Sub2 网站地址，例如 https://sub2.example.com" value="${escapeHTML(state.config.sub2BaseUrl || "")}" />
+      <input class="field" name="sub2Email" autocomplete="username" placeholder="邮箱" value="${escapeHTML(state.config.sub2Email || "")}" />
+      <input class="field" name="password" autocomplete="current-password" placeholder="密码" type="password" />
       <label class="check"><input type="checkbox" name="remember" ${state.config.rememberLogin ? "checked" : ""} />记住登录状态</label>
     `;
   }
@@ -447,7 +504,7 @@ function renderLoginPrimaryButton(provider) {
     return `<button class="primary" type="submit">${state.busy ? "验证中..." : "完成登录"}</button>`;
   }
   if (provider === "sub2") {
-    return `<button class="primary" type="button" disabled>暂未开放</button>`;
+    return `<button class="primary" type="submit">${state.busy ? "登录中..." : "登录"}</button>`;
   }
   return `<button class="primary" type="submit">${state.busy ? "登录中..." : "登录"}</button>`;
 }
@@ -597,6 +654,12 @@ async function onAction(event) {
       render();
     }
   } else if (action === "cancel-modal") {
+    if (!state.snapshot.loggedIn && state.modal && state.modal !== "login") {
+      state.modal = "login";
+      state.formError = "";
+      render();
+      return;
+    }
     if (!state.snapshot.loggedIn) {
       await api.HidePanel();
       return;
@@ -643,16 +706,23 @@ function isAuthRequiredMessage(message) {
 
 async function onLogin(event) {
   event.preventDefault();
-  if ((state.config.provider || "krill") !== "krill") {
+  const provider = state.config.provider || "krill";
+  if (provider === "newapi") {
     return;
   }
   if (state.busy) {
     return;
   }
   const form = new FormData(event.currentTarget);
-  const email = text(form.get("email")).trim();
+  const baseUrl = text(form.get("sub2BaseUrl")).trim();
+  const email = text(form.get(provider === "sub2" ? "sub2Email" : "email")).trim();
   const password = text(form.get("password"));
   const rememberLogin = form.get("remember") === "on";
+  if (provider === "sub2" && !baseUrl) {
+    state.formError = "请输入 Sub2 网站地址";
+    render();
+    return;
+  }
   if (!email || !password) {
     state.formError = "请输入邮箱和密码";
     render();
@@ -662,9 +732,13 @@ async function onLogin(event) {
   state.formError = "";
   render();
   try {
-    const snap = await backend().Login({ provider: "krill", email, password, rememberLogin });
+    const snap = await backend().Login({ provider, baseUrl, email, password, rememberLogin });
     state.snapshot = snap;
-    state.config = { ...state.config, email, rememberLogin };
+    if (provider === "sub2") {
+      state.config = { ...state.config, provider, sub2BaseUrl: baseUrl, sub2Email: email, rememberLogin };
+    } else {
+      state.config = { ...state.config, provider, email, rememberLogin };
+    }
     state.modal = "";
   } catch (err) {
     state.formError = String(err || "登录失败");
@@ -685,6 +759,12 @@ function syncLoginFormState(form) {
   }
   if (data.has("newapiBaseUrl")) {
     state.config.newapiBaseUrl = text(data.get("newapiBaseUrl")).trim();
+  }
+  if (data.has("sub2BaseUrl")) {
+    state.config.sub2BaseUrl = text(data.get("sub2BaseUrl")).trim();
+  }
+  if (data.has("sub2Email")) {
+    state.config.sub2Email = text(data.get("sub2Email")).trim();
   }
   if (form.querySelector('input[name="autoCallback"]')) {
     state.config.newapiAutoCallback = data.get("autoCallback") === "on";
@@ -849,6 +929,7 @@ async function onSettings(event) {
     rememberLogin: form.get("remember") === "on",
     provider: state.config.provider || "krill",
     newapiBaseUrl: state.config.newapiBaseUrl || "",
+    sub2BaseUrl: state.config.sub2BaseUrl || "",
     codexFastProxyEnabled: form.get("codexFastProxyEnabled") === "on",
   };
   try {
@@ -904,6 +985,8 @@ async function boot() {
   state.config = { ...state.config, ...initial.config };
   state.config.provider ||= "krill";
   state.config.newapiBaseUrl ||= "";
+  state.config.sub2BaseUrl ||= "";
+  state.config.sub2Email ||= "";
   state.snapshot = initial.snapshot;
   if (!state.snapshot.loggedIn) {
     state.modal = "login";

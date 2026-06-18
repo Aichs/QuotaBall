@@ -18,6 +18,7 @@ type LoginRequest struct {
 	Email         string `json:"email"`
 	Password      string `json:"password"`
 	Provider      string `json:"provider"`
+	BaseURL       string `json:"baseUrl"`
 	RememberLogin bool   `json:"rememberLogin"`
 }
 
@@ -49,6 +50,7 @@ type SettingsRequest struct {
 	RememberLogin         bool   `json:"rememberLogin"`
 	Provider              string `json:"provider"`
 	NewAPIBaseURL         string `json:"newapiBaseUrl"`
+	Sub2BaseURL           string `json:"sub2BaseUrl"`
 	CodexFastProxyEnabled bool   `json:"codexFastProxyEnabled"`
 }
 
@@ -56,6 +58,8 @@ type PublicConfigDTO struct {
 	Email                 string  `json:"email"`
 	Provider              string  `json:"provider"`
 	NewAPIBaseURL         string  `json:"newapiBaseUrl"`
+	Sub2BaseURL           string  `json:"sub2BaseUrl"`
+	Sub2Email             string  `json:"sub2Email"`
 	RememberLogin         bool    `json:"rememberLogin"`
 	RefreshSec            int     `json:"refreshSec"`
 	Opacity               float64 `json:"opacity"`
@@ -95,6 +99,7 @@ type SnapshotDTO struct {
 type SummaryDTO struct {
 	TotalUsedUSD                 float64 `json:"totalUsedUsd"`
 	TotalDailyQuotaUSD           float64 `json:"totalDailyQuotaUsd"`
+	TotalDailyUsedUSD            float64 `json:"totalDailyUsedUsd"`
 	TotalForwardedRemainingUSD   float64 `json:"totalForwardedRemainingUsd"`
 	TotalForwardedLimitUSD       float64 `json:"totalForwardedLimitUsd"`
 	TotalForwardedUsedUSD        float64 `json:"totalForwardedUsedUsd"`
@@ -104,6 +109,7 @@ type SummaryDTO struct {
 	TotalDailyForwardedUsedUSD   float64 `json:"totalDailyForwardedUsedUsd"`
 	TotalDailyForwardedRemainUSD float64 `json:"totalDailyForwardedRemainUsd"`
 	TotalWeeklyQuotaUSD          float64 `json:"totalWeeklyQuotaUsd"`
+	TotalWeeklyUsedUSD           float64 `json:"totalWeeklyUsedUsd"`
 	TotalWeeklyRemainingUSD      float64 `json:"totalWeeklyRemainingUsd"`
 	TotalMonthlyQuotaUSD         float64 `json:"totalMonthlyQuotaUsd"`
 	TotalMonthlyUsedUSD          float64 `json:"totalMonthlyUsedUsd"`
@@ -142,6 +148,8 @@ func configDTO(cfg config.Config, hasSavedLogin bool) PublicConfigDTO {
 		Email:                 cfg.Email,
 		Provider:              cfg.Provider,
 		NewAPIBaseURL:         cfg.NewAPIBaseURL,
+		Sub2BaseURL:           cfg.Sub2BaseURL,
+		Sub2Email:             cfg.Sub2Email,
 		RememberLogin:         cfg.RememberLogin,
 		RefreshSec:            cfg.RefreshSec,
 		Opacity:               cfg.Opacity,
@@ -161,7 +169,7 @@ func configDTO(cfg config.Config, hasSavedLogin bool) PublicConfigDTO {
 func snapshotDTO(s krill.Snapshot) SnapshotDTO {
 	subs := make([]SubscriptionDTO, 0, len(s.Subscriptions))
 	for _, sub := range s.Subscriptions {
-		subs = append(subs, subscriptionDTO(sub))
+		subs = append(subs, subscriptionDTO(s.Provider, sub))
 	}
 	return SnapshotDTO{
 		Provider:        s.Provider,
@@ -171,7 +179,7 @@ func snapshotDTO(s krill.Snapshot) SnapshotDTO {
 		Success:         s.Success,
 		Fail:            s.Fail,
 		Cache:           fallback(s.Cache, "-"),
-		Summary:         summaryDTO(s.Summary),
+		Summary:         summaryDTO(s.Provider, s.Summary),
 		Subscriptions:   subs,
 		Time:            timeString(s.Time),
 		TimeLabel:       timeLabel(s.Time),
@@ -185,27 +193,36 @@ func snapshotDTO(s krill.Snapshot) SnapshotDTO {
 	}
 }
 
-func summaryDTO(s krill.Summary) SummaryDTO {
+func summaryDTO(provider string, s krill.Summary) SummaryDTO {
 	weeklyQuota := s.TotalWeeklyQuotaUSD
-	if weeklyQuota == 0 {
+	if usesKrillQuotaFallbacks(provider) && weeklyQuota == 0 {
 		weeklyQuota = s.TotalDailyQuotaUSD
 	}
 	weeklyRemaining := s.TotalWeeklyRemainingUSD
-	if weeklyRemaining == 0 && weeklyQuota > 0 {
+	if usesKrillQuotaFallbacks(provider) && weeklyRemaining == 0 && weeklyQuota > 0 {
 		weeklyRemaining = firstPositiveFloat(s.TotalRemainingUSD, s.TotalDailyRemainingUSD, math.Max(0, weeklyQuota-s.TotalUsedUSD))
 	}
+	dailyUsed := s.TotalDailyUsedUSD
+	if usesKrillQuotaFallbacks(provider) && dailyUsed == 0 && s.TotalDailyQuotaUSD > 0 {
+		dailyUsed = math.Max(0, s.TotalDailyQuotaUSD-s.TotalDailyRemainingUSD)
+	}
+	weeklyUsed := s.TotalWeeklyUsedUSD
+	if usesKrillQuotaFallbacks(provider) && weeklyUsed == 0 && weeklyQuota > 0 {
+		weeklyUsed = math.Max(0, weeklyQuota-weeklyRemaining)
+	}
 	monthlyUsed := s.TotalMonthlyUsedUSD
-	if monthlyUsed == 0 {
+	if usesKrillQuotaFallbacks(provider) && monthlyUsed == 0 {
 		monthlyUsed = s.TotalUsedUSD
 	}
 	monthlyQuota := s.TotalMonthlyQuotaUSD
 	monthlyRemaining := s.TotalMonthlyRemainingUSD
-	if monthlyRemaining == 0 && monthlyQuota > 0 {
+	if usesKrillQuotaFallbacks(provider) && monthlyRemaining == 0 && monthlyQuota > 0 {
 		monthlyRemaining = math.Max(0, monthlyQuota-monthlyUsed)
 	}
 	return SummaryDTO{
 		TotalUsedUSD:                 s.TotalUsedUSD,
 		TotalDailyQuotaUSD:           s.TotalDailyQuotaUSD,
+		TotalDailyUsedUSD:            dailyUsed,
 		TotalForwardedRemainingUSD:   s.TotalForwardedRemainingUSD,
 		TotalForwardedLimitUSD:       s.TotalForwardedLimitUSD,
 		TotalForwardedUsedUSD:        s.TotalForwardedUsedUSD,
@@ -215,6 +232,7 @@ func summaryDTO(s krill.Summary) SummaryDTO {
 		TotalDailyForwardedUsedUSD:   s.TotalDailyForwardedUsedUSD,
 		TotalDailyForwardedRemainUSD: s.TotalDailyForwardedRemainUSD,
 		TotalWeeklyQuotaUSD:          weeklyQuota,
+		TotalWeeklyUsedUSD:           weeklyUsed,
 		TotalWeeklyRemainingUSD:      weeklyRemaining,
 		TotalMonthlyQuotaUSD:         monthlyQuota,
 		TotalMonthlyUsedUSD:          monthlyUsed,
@@ -222,41 +240,41 @@ func summaryDTO(s krill.Summary) SummaryDTO {
 	}
 }
 
-func subscriptionDTO(s krill.Subscription) SubscriptionDTO {
+func subscriptionDTO(provider string, s krill.Subscription) SubscriptionDTO {
 	days := fmt.Sprint(s.DaysLeft)
 	if days == "" || days == "<nil>" {
 		days = "?"
 	}
 	weeklyLimit := s.WeeklyLimit
-	if weeklyLimit == 0 {
+	if usesKrillQuotaFallbacks(provider) && weeklyLimit == 0 {
 		weeklyLimit = s.DailyLimit
 	}
 	weeklyUsed := s.WeeklyUsed
-	if weeklyUsed == 0 {
+	if usesKrillQuotaFallbacks(provider) && weeklyUsed == 0 {
 		weeklyUsed = s.DailyUsed
 	}
 	weeklyRemaining := s.WeeklyRemaining
-	if weeklyRemaining == 0 {
+	if usesKrillQuotaFallbacks(provider) && weeklyRemaining == 0 {
 		weeklyRemaining = s.DailyRemaining
 	}
 	weeklyPercent := s.WeeklyPercent
-	if weeklyPercent == 0 {
+	if usesKrillQuotaFallbacks(provider) && weeklyPercent == 0 {
 		weeklyPercent = s.DailyPercent
 	}
 	monthlyLimit := s.MonthlyLimit
-	if monthlyLimit == 0 {
+	if usesKrillQuotaFallbacks(provider) && monthlyLimit == 0 {
 		monthlyLimit = weeklyLimit
 	}
 	monthlyUsed := s.MonthlyUsed
-	if monthlyUsed == 0 {
+	if usesKrillQuotaFallbacks(provider) && monthlyUsed == 0 {
 		monthlyUsed = weeklyUsed
 	}
 	monthlyRemaining := s.MonthlyRemaining
-	if monthlyRemaining == 0 && monthlyLimit > 0 {
+	if usesKrillQuotaFallbacks(provider) && monthlyRemaining == 0 && monthlyLimit > 0 {
 		monthlyRemaining = math.Max(0, monthlyLimit-monthlyUsed)
 	}
 	monthlyPercent := s.MonthlyPercent
-	if monthlyPercent == 0 && monthlyLimit > 0 {
+	if usesKrillQuotaFallbacks(provider) && monthlyPercent == 0 && monthlyLimit > 0 {
 		monthlyPercent = math.Max(0, math.Min(100, math.Round((monthlyUsed/monthlyLimit*100)*10)/10))
 	}
 	return SubscriptionDTO{
@@ -284,6 +302,10 @@ func subscriptionDTO(s krill.Subscription) SubscriptionDTO {
 		MonthlyRemaining:   monthlyRemaining,
 		MonthlyPercent:     monthlyPercent,
 	}
+}
+
+func usesKrillQuotaFallbacks(provider string) bool {
+	return provider == "" || provider == config.ProviderKrill
 }
 
 func firstPositiveFloat(values ...float64) float64 {

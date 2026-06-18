@@ -70,14 +70,17 @@ func TestBallCenterMatchesPySideSphereRect(t *testing.T) {
 }
 
 func TestNormalizedGlassMetricAllowsWeeklyAndMonthly(t *testing.T) {
+	if got := normalizedGlassMetric("daily"); got != "daily" {
+		t.Fatalf("normalizedGlassMetric(daily) = %q", got)
+	}
 	if got := normalizedGlassMetric("weekly"); got != "weekly" {
 		t.Fatalf("normalizedGlassMetric(weekly) = %q", got)
 	}
 	if got := normalizedGlassMetric("monthly"); got != "monthly" {
 		t.Fatalf("normalizedGlassMetric(monthly) = %q", got)
 	}
-	if got := normalizedGlassMetric("daily"); got != "weekly" {
-		t.Fatalf("legacy daily metric normalized to %q, want weekly", got)
+	if got := normalizedGlassMetricForProvider(config.ProviderKrill, "daily"); got != "weekly" {
+		t.Fatalf("Krill daily metric normalized to %q, want weekly", got)
 	}
 }
 
@@ -93,6 +96,32 @@ func TestGlassBallToggleMetricCyclesWeeklyMonthlyAndPersists(t *testing.T) {
 	g.toggleMetric()
 	if g.mode != "weekly" || host.cfg.TbarMetric != "weekly" {
 		t.Fatalf("second toggle mode=%q config=%q, want weekly", g.mode, host.cfg.TbarMetric)
+	}
+}
+
+func TestGlassBallSub2ToggleMetricCyclesDailyWeeklyMonthlyAndPersists(t *testing.T) {
+	host := &fakeGlassBallHost{cfg: config.Default()}
+	host.cfg.Provider = config.ProviderSub2
+	host.cfg.TbarMetric = "daily"
+	g := &glassBall{
+		host: host,
+		mode: "daily",
+		snap: krill.Snapshot{Provider: config.ProviderSub2, OK: true},
+	}
+
+	g.toggleMetric()
+	if g.mode != "weekly" || host.cfg.TbarMetric != "weekly" {
+		t.Fatalf("first Sub2 toggle mode=%q config=%q, want weekly", g.mode, host.cfg.TbarMetric)
+	}
+
+	g.toggleMetric()
+	if g.mode != "monthly" || host.cfg.TbarMetric != "monthly" {
+		t.Fatalf("second Sub2 toggle mode=%q config=%q, want monthly", g.mode, host.cfg.TbarMetric)
+	}
+
+	g.toggleMetric()
+	if g.mode != "daily" || host.cfg.TbarMetric != "daily" {
+		t.Fatalf("third Sub2 toggle mode=%q config=%q, want daily", g.mode, host.cfg.TbarMetric)
 	}
 }
 
@@ -120,6 +149,50 @@ func TestGlassBallMetricUsesSelectedMonthlyQuota(t *testing.T) {
 	}
 	if label != "月总额度" || pct != 25 || used != 600 || limit != 2400 {
 		t.Fatalf("monthly metric = (%q, %v, %v, %v), want monthly quota fields", label, pct, used, limit)
+	}
+}
+
+func TestGlassBallSub2MetricUsesSelectedDailyWeeklyMonthlyQuota(t *testing.T) {
+	sub := krill.Subscription{
+		DailyLimit:       100,
+		DailyUsed:        25,
+		DailyRemaining:   75,
+		DailyPercent:     25,
+		WeeklyLimit:      700,
+		WeeklyUsed:       140,
+		WeeklyRemaining:  560,
+		WeeklyPercent:    20,
+		MonthlyLimit:     3000,
+		MonthlyUsed:      1500,
+		MonthlyRemaining: 1500,
+		MonthlyPercent:   50,
+	}
+	for _, tc := range []struct {
+		mode  string
+		label string
+		pct   float64
+		used  float64
+		limit float64
+	}{
+		{"daily", "每日额度", 25, 25, 100},
+		{"weekly", "每周额度", 20, 140, 700},
+		{"monthly", "每月额度", 50, 1500, 3000},
+	} {
+		g := &glassBall{
+			mode: tc.mode,
+			snap: krill.Snapshot{
+				Provider:      config.ProviderSub2,
+				OK:            true,
+				Subscriptions: []krill.Subscription{sub},
+			},
+		}
+		label, pct, used, limit, ok := g.metric()
+		if !ok {
+			t.Fatalf("%s metric returned not ok", tc.mode)
+		}
+		if label != tc.label || pct != tc.pct || used != tc.used || limit != tc.limit {
+			t.Fatalf("%s metric = (%q, %v, %v, %v), want (%q, %v, %v, %v)", tc.mode, label, pct, used, limit, tc.label, tc.pct, tc.used, tc.limit)
+		}
 	}
 }
 
@@ -211,6 +284,17 @@ func TestGlassBallMonthlyRenderingUsesWarmWaterPalette(t *testing.T) {
 	}
 	if int(m.R)-int(w.R) < 45 || int(w.B)-int(m.B) < 35 {
 		t.Fatalf("monthly water is not visually distinct from weekly cyan: weekly=%+v monthly=%+v", w, m)
+	}
+}
+
+func TestGlassBallDailyRenderingUsesBlueWaterPalette(t *testing.T) {
+	daily, err := renderBallFrameImage(34, true, 0, "daily")
+	if err != nil {
+		t.Fatal(err)
+	}
+	water := daily.RGBAAt(95, 150)
+	if water.B <= water.R || water.G <= water.R {
+		t.Fatalf("daily water should be blue at sample pixel: %+v", water)
 	}
 }
 

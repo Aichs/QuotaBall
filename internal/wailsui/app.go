@@ -23,6 +23,7 @@ import (
 	"quotaball/internal/newapi"
 	"quotaball/internal/paths"
 	"quotaball/internal/secret"
+	"quotaball/internal/sub2"
 	"quotaball/internal/ui"
 )
 
@@ -49,6 +50,7 @@ type App struct {
 	cfg    config.Config
 	svc    *krill.Service
 	newSvc *newapi.Service
+	subSvc *sub2.Service
 
 	mu          sync.Mutex
 	snap        krill.Snapshot
@@ -173,6 +175,11 @@ func NewApp() (*App, error) {
 		Secrets: st,
 	}
 	app.newSvc.Configure(app.cfg)
+	app.subSvc = &sub2.Service{
+		Config:  &app.cfg,
+		Secrets: st,
+	}
+	app.subSvc.Configure(app.cfg)
 	app.snap = krill.EmptySnapshot("正在检查登录状态...")
 	app.snap.Provider = normalizeProvider(cfg.Provider)
 	if !app.hasLoginState() {
@@ -322,7 +329,7 @@ func (a *App) Snapshot() (SnapshotDTO, error) {
 
 func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 	provider := normalizeProvider(req.Provider)
-	if provider != "" && provider != config.ProviderKrill {
+	if provider != "" && provider != config.ProviderKrill && provider != config.ProviderSub2 {
 		return SnapshotDTO{}, errors.New("该登录方式不支持邮箱密码")
 	}
 	email := strings.TrimSpace(req.Email)
@@ -338,6 +345,38 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	if provider == config.ProviderSub2 {
+		baseURL, err := sub2.NormalizeBaseURL(req.BaseURL)
+		if err != nil {
+			return SnapshotDTO{}, err
+		}
+		snap, err := a.subSvc.Login(ctx, baseURL, email, req.Password, req.RememberLogin)
+		if err != nil {
+			return SnapshotDTO{}, err
+		}
+		if current, stale := a.snapshotIfAuthChanged(authGen); stale {
+			return snapshotDTO(current), krill.ErrAuthRequired
+		}
+
+		a.mu.Lock()
+		a.cfg.Provider = config.ProviderSub2
+		a.cfg.Sub2BaseURL = baseURL
+		a.cfg.Sub2Email = email
+		a.cfg.RememberLogin = req.RememberLogin
+		a.cfg.Password = ""
+		a.authGen++
+		cfg := a.cfg
+		a.mu.Unlock()
+		a.subSvc.Configure(cfg)
+		if err := config.Save(a.paths.Config, cfg); err != nil {
+			return SnapshotDTO{}, err
+		}
+		if snap.Provider == "" {
+			snap.Provider = config.ProviderSub2
+		}
+		a.applySnapshot(snap, true)
+		return snapshotDTO(snap), nil
+	}
 	if err := a.svc.Login(ctx, email, req.Password, req.RememberLogin); err != nil {
 		return SnapshotDTO{}, err
 	}
@@ -511,9 +550,14 @@ func (a *App) completeCapturedNewAPIOAuth(req NewAPIOAuthCompleteRequest) {
 func (a *App) Logout() (SnapshotDTO, error) {
 	a.stopOAuthCapture()
 	provider := a.activeProvider()
-	if provider == config.ProviderNewAPI {
+	switch provider {
+	case config.ProviderNewAPI:
 		a.newSvc.Logout()
-	} else {
+	case config.ProviderSub2:
+		if a.subSvc != nil {
+			a.subSvc.Logout()
+		}
+	default:
 		a.svc.Logout()
 	}
 	snap := krill.EmptySnapshot("已退出登录")
@@ -529,6 +573,9 @@ func (a *App) Logout() (SnapshotDTO, error) {
 	a.mu.Unlock()
 	a.svc.Configure(cfg)
 	a.newSvc.Configure(cfg)
+	if a.subSvc != nil {
+		a.subSvc.Configure(cfg)
+	}
 	if glass != nil {
 		glass.Hide()
 		glass.SetSnapshot(snap)
@@ -652,13 +699,14 @@ func (a *App) SaveSettings(req SettingsRequest) (PublicConfigDTO, error) {
 	cfg := a.cfg
 	oldProvider := a.cfg.Provider
 	oldNewAPIBaseURL := a.cfg.NewAPIBaseURL
+	oldSub2BaseURL := a.cfg.Sub2BaseURL
 	oldRememberLogin := a.cfg.RememberLogin
 	oldCodexFastProxyEnabled := a.cfg.CodexFastProxyEnabled
 	cfg.RefreshSec = clampInt(req.RefreshSec, 3, 3600)
 	cfg.OnTop = req.OnTop
 	cfg.RememberLogin = req.RememberLogin
 	cfg.CodexFastProxyEnabled = req.CodexFastProxyEnabled
-	if provider := normalizeProvider(req.Provider); provider == config.ProviderKrill || provider == config.ProviderNewAPI {
+	if provider := normalizeProvider(req.Provider); provider == config.ProviderKrill || provider == config.ProviderNewAPI || provider == config.ProviderSub2 {
 		cfg.Provider = provider
 	}
 	if cfg.Provider != config.ProviderNewAPI {
@@ -667,7 +715,10 @@ func (a *App) SaveSettings(req SettingsRequest) (PublicConfigDTO, error) {
 	if strings.TrimSpace(req.NewAPIBaseURL) != "" {
 		cfg.NewAPIBaseURL = strings.TrimRight(strings.TrimSpace(req.NewAPIBaseURL), "/")
 	}
-	if cfg.Provider != oldProvider || cfg.NewAPIBaseURL != oldNewAPIBaseURL || cfg.RememberLogin != oldRememberLogin {
+	if strings.TrimSpace(req.Sub2BaseURL) != "" {
+		cfg.Sub2BaseURL = strings.TrimRight(strings.TrimSpace(req.Sub2BaseURL), "/")
+	}
+	if cfg.Provider != oldProvider || cfg.NewAPIBaseURL != oldNewAPIBaseURL || cfg.Sub2BaseURL != oldSub2BaseURL || cfg.RememberLogin != oldRememberLogin {
 		a.authGen++
 	}
 	ctx := a.ctx
@@ -691,8 +742,15 @@ func (a *App) SaveSettings(req SettingsRequest) (PublicConfigDTO, error) {
 	a.mu.Unlock()
 	a.svc.Configure(cfg)
 	a.newSvc.Configure(cfg)
+	if a.subSvc != nil {
+		a.subSvc.Configure(cfg)
+	}
 	if !cfg.RememberLogin {
-		if err := errors.Join(a.svc.ClearSavedLogin(), a.newSvc.ClearSavedLogin()); err != nil {
+		var subErr error
+		if a.subSvc != nil {
+			subErr = a.subSvc.ClearSavedLogin()
+		}
+		if err := errors.Join(a.svc.ClearSavedLogin(), a.newSvc.ClearSavedLogin(), subErr); err != nil {
 			return PublicConfigDTO{}, err
 		}
 	}
@@ -804,7 +862,7 @@ func (a *App) refresh(reveal bool) (SnapshotDTO, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	snap, err := a.fetch(ctx)
-	if err != nil && (errors.Is(err, krill.ErrAuthRequired) || errors.Is(err, newapi.ErrAuthRequired)) {
+	if err != nil && (errors.Is(err, krill.ErrAuthRequired) || errors.Is(err, newapi.ErrAuthRequired) || errors.Is(err, sub2.ErrAuthRequired)) {
 		snap = krill.EmptySnapshot(a.loginRequiredMessage())
 		snap.Provider = a.activeProvider()
 	}
@@ -828,9 +886,15 @@ func (a *App) fetch(ctx context.Context) (krill.Snapshot, error) {
 	var snap krill.Snapshot
 	var err error
 	provider := a.activeProvider()
-	if provider == config.ProviderNewAPI {
+	switch provider {
+	case config.ProviderNewAPI:
 		snap, err = a.newSvc.Fetch(ctx)
-	} else {
+	case config.ProviderSub2:
+		if a.subSvc == nil {
+			return krill.EmptySnapshot("Sub2 服务未初始化"), errors.New("Sub2 服务未初始化")
+		}
+		snap, err = a.subSvc.Fetch(ctx)
+	default:
 		snap, err = a.svc.Fetch(ctx)
 	}
 	if snap.Provider == "" {
@@ -838,7 +902,11 @@ func (a *App) fetch(ctx context.Context) (krill.Snapshot, error) {
 	}
 	if snap.Email == "" {
 		a.mu.Lock()
-		snap.Email = a.cfg.Email
+		if provider == config.ProviderSub2 {
+			snap.Email = a.cfg.Sub2Email
+		} else {
+			snap.Email = a.cfg.Email
+		}
 		a.mu.Unlock()
 	}
 	return snap, err
@@ -946,22 +1014,31 @@ func (a *App) activeProvider() string {
 }
 
 func (a *App) hasLoginState() bool {
-	if a.activeProvider() == config.ProviderNewAPI {
+	switch a.activeProvider() {
+	case config.ProviderNewAPI:
 		return a.newSvc.HasLoginState()
+	case config.ProviderSub2:
+		return a.subSvc != nil && a.subSvc.HasLoginState()
 	}
 	return a.svc.HasLoginState()
 }
 
 func (a *App) hasSavedLoginState() bool {
-	if a.activeProvider() == config.ProviderNewAPI {
+	switch a.activeProvider() {
+	case config.ProviderNewAPI:
 		return a.newSvc.HasSavedLoginState()
+	case config.ProviderSub2:
+		return a.subSvc != nil && a.subSvc.HasSavedLoginState()
 	}
 	return a.svc.HasSavedLoginState()
 }
 
 func (a *App) loginRequiredMessage() string {
-	if a.activeProvider() == config.ProviderNewAPI {
+	switch a.activeProvider() {
+	case config.ProviderNewAPI:
 		return "请登录 NewAPI"
+	case config.ProviderSub2:
+		return "请登录 Sub2"
 	}
 	return "请登录 Krill AI"
 }

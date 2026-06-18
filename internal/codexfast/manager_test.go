@@ -81,6 +81,33 @@ base_url = "http://127.0.0.1:48251/codex/v1"
 	}
 }
 
+func TestRestoreCodexConfigDisablesFastFlags(t *testing.T) {
+	raw := `model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:48251/codex/v1"
+
+[features]
+fast_mode = true
+
+[notice]
+fast_default_opt_out = false
+`
+	got, err := RestoreCodexConfig(raw, "http://127.0.0.1:48251/codex/v1", "https://api.example.test/codex/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`base_url = "https://api.example.test/codex/v1"`,
+		`fast_mode = false`,
+		`fast_default_opt_out = true`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("restored config missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestEnabledInCodexConfigDetectsProxyBaseURL(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`model_provider = "custom"

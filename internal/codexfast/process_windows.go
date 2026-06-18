@@ -25,6 +25,9 @@ func enableAutoStart(scriptPath string) error {
 func disableAutoStart() error {
 	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
 	if err != nil {
+		if err == registry.ErrNotExist {
+			return nil
+		}
 		return err
 	}
 	defer key.Close()

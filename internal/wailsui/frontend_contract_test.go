@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"quotaball/internal/config"
 	"quotaball/internal/krill"
 )
 
@@ -57,18 +58,69 @@ func TestFrontendKrillPanelUsesWeeklyAndMonthlyQuotaLabels(t *testing.T) {
 	}
 	js := string(raw)
 
+	start := strings.Index(js, "function renderSub")
+	if start < 0 {
+		t.Fatalf("frontend must define renderSub")
+	}
+	end := strings.Index(js[start:], "function subQuota")
+	if end < 0 {
+		t.Fatalf("renderSub test could not find function boundary")
+	}
+	renderSub := js[start : start+end]
 	for _, want := range []string{"周额度", "月总额度"} {
-		if !strings.Contains(js, want) {
+		if !strings.Contains(renderSub, want) {
 			t.Fatalf("Krill quota panel must expose %q", want)
 		}
 	}
-	for _, removed := range []string{"转结", "当日", "日额度"} {
-		if strings.Contains(js, removed) {
+	for _, removed := range []string{"转结", "当日"} {
+		if strings.Contains(renderSub, removed) {
 			t.Fatalf("Krill quota panel must not use old quota label %q", removed)
 		}
 	}
 	if !strings.Contains(js, "weeklyLimit") || !strings.Contains(js, "monthlyLimit") {
 		t.Fatalf("frontend must read explicit weekly and monthly quota fields")
+	}
+}
+
+func TestFrontendSub2PanelUsesBalanceAndDailyWeeklyMonthlyQuotas(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	for _, want := range []string{
+		"function isSub2Provider",
+		"function sub2StatCards",
+		"账户余额",
+		"今日剩余",
+		"本周剩余",
+		"本月剩余",
+		"我的订阅",
+		"每日额度",
+		"每周额度",
+		"每月额度",
+		"sub2BaseUrl",
+		"sub2Email",
+		`provider === "sub2"`,
+		`baseUrl`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("Sub2 frontend support must include %q", want)
+		}
+	}
+	start := strings.Index(js, "function subQuota")
+	if start < 0 {
+		t.Fatalf("frontend must define subQuota")
+	}
+	end := strings.Index(js[start:], "function renderQuota")
+	if end < 0 {
+		t.Fatalf("subQuota test could not find function boundary")
+	}
+	subQuota := js[start : start+end]
+	if !strings.Contains(subQuota, "sub2 ? coalescedNumber(sub.weeklyLimit)") ||
+		!strings.Contains(subQuota, "sub2 ? coalescedNumber(sub.monthlyLimit)") {
+		t.Fatalf("Sub2 quotas must use exact weekly/monthly fields without Krill daily fallback")
 	}
 }
 
@@ -150,6 +202,58 @@ func TestFrontendSettingsExposeCodexFastProxySwitch(t *testing.T) {
 		if !strings.Contains(js, want) {
 			t.Fatalf("frontend settings must include %q", want)
 		}
+	}
+}
+
+func TestFrontendLoggedOutSettingsCanConfigureCodexFastProxy(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	start := strings.Index(js, "function renderLoggedOut")
+	if start < 0 {
+		t.Fatalf("frontend must define renderLoggedOut")
+	}
+	end := strings.Index(js[start:], "function renderMainPanel")
+	if end < 0 {
+		t.Fatalf("renderLoggedOut test could not find function boundary")
+	}
+	loggedOut := js[start : start+end]
+	for _, want := range []string{
+		"renderModal()",
+		`state.modal !== "login"`,
+	} {
+		if !strings.Contains(loggedOut, want) {
+			t.Fatalf("logged-out render path must keep non-login modals available, missing %q", want)
+		}
+	}
+
+	start = strings.Index(js, "function renderLogin")
+	if start < 0 {
+		t.Fatalf("frontend must define renderLogin")
+	}
+	end = strings.Index(js[start:], "function loggedOutSnapshotError")
+	if end < 0 {
+		t.Fatalf("renderLogin test could not find function boundary")
+	}
+	login := js[start : start+end]
+	if !strings.Contains(login, `data-action="settings"`) {
+		t.Fatalf("logged-out login view must expose settings so Codex Fast can be configured before account login")
+	}
+
+	start = strings.Index(js, `action === "cancel-modal"`)
+	if start < 0 {
+		t.Fatalf("frontend must handle cancel-modal")
+	}
+	end = strings.Index(js[start:], `action === "newapi-start-oauth"`)
+	if end < 0 {
+		t.Fatalf("cancel-modal test could not find action boundary")
+	}
+	cancel := js[start : start+end]
+	if !strings.Contains(cancel, `state.modal !== "login"`) || !strings.Contains(cancel, `state.modal = "login";`) {
+		t.Fatalf("logged-out settings cancel should return to the login view instead of hiding the panel")
 	}
 }
 
@@ -500,6 +604,34 @@ func TestSnapshotDTOIncludesProviderForFrontendBranching(t *testing.T) {
 	dto := snapshotDTO(krill.Snapshot{Provider: "newapi", LoggedIn: true, OK: true})
 	if dto.Provider != "newapi" {
 		t.Fatalf("SnapshotDTO.Provider = %q, want newapi", dto.Provider)
+	}
+}
+
+func TestSnapshotDTODoesNotApplyKrillQuotaFallbacksToSub2(t *testing.T) {
+	dto := snapshotDTO(krill.Snapshot{
+		Provider: config.ProviderSub2,
+		Summary: krill.Summary{
+			TotalDailyQuotaUSD:     100,
+			TotalDailyRemainingUSD: 60,
+		},
+		Subscriptions: []krill.Subscription{{
+			Name:           "Daily only",
+			DailyLimit:     100,
+			DailyUsed:      40,
+			DailyRemaining: 60,
+			DailyPercent:   40,
+		}},
+	})
+
+	if dto.Summary.TotalWeeklyQuotaUSD != 0 || dto.Summary.TotalMonthlyQuotaUSD != 0 {
+		t.Fatalf("Sub2 summary should keep exact weekly/monthly zero values: %#v", dto.Summary)
+	}
+	if len(dto.Subscriptions) != 1 {
+		t.Fatalf("subscriptions = %d, want 1", len(dto.Subscriptions))
+	}
+	sub := dto.Subscriptions[0]
+	if sub.WeeklyLimit != 0 || sub.WeeklyUsed != 0 || sub.WeeklyRemaining != 0 || sub.MonthlyLimit != 0 {
+		t.Fatalf("Sub2 subscription should keep exact weekly/monthly zero values: %#v", sub)
 	}
 }
 

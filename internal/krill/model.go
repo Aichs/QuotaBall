@@ -53,6 +53,7 @@ func (s Snapshot) RemainingWeekly() float64 {
 type Summary struct {
 	TotalUsedUSD                 float64 `json:"total_used_usd"`
 	TotalDailyQuotaUSD           float64 `json:"total_daily_quota_usd"`
+	TotalDailyUsedUSD            float64 `json:"-"`
 	TotalForwardedRemainingUSD   float64 `json:"total_forwarded_remaining_usd"`
 	TotalForwardedLimitUSD       float64 `json:"total_forwarded_limit_usd"`
 	TotalForwardedUsedUSD        float64 `json:"total_forwarded_used_usd"`
@@ -62,6 +63,7 @@ type Summary struct {
 	TotalDailyForwardedUsedUSD   float64 `json:"total_daily_forwarded_used_usd"`
 	TotalDailyForwardedRemainUSD float64 `json:"total_daily_forwarded_remain_usd"`
 	TotalWeeklyQuotaUSD          float64 `json:"-"`
+	TotalWeeklyUsedUSD           float64 `json:"-"`
 	TotalWeeklyRemainingUSD      float64 `json:"-"`
 	TotalMonthlyQuotaUSD         float64 `json:"-"`
 	TotalMonthlyUsedUSD          float64 `json:"-"`
