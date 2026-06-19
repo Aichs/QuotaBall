@@ -325,8 +325,12 @@ func drawSubscriptionText(canvas *walk.Canvas, fonts *panelFonts, item panelSubL
 	}
 	r := item.rect
 	sub := item.sub
+	badgeText := daysText(sub.DaysLeft)
+	if sub.CurrentWindow {
+		badgeText = "当前消耗"
+	}
 	draw(nonEmpty(sub.Name, "套餐"), fonts.subName, walk.RGB(11, 38, 56), walk.Rectangle{X: r.X + 12, Y: r.Y + 9, Width: r.Width - 130, Height: 22}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
-	draw(daysText(sub.DaysLeft), fonts.badge, walk.RGB(8, 112, 86), walk.Rectangle{X: r.X + r.Width - 116, Y: r.Y + 10, Width: 100, Height: 20}, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
+	draw(badgeText, fonts.badge, walk.RGB(8, 112, 86), walk.Rectangle{X: r.X + r.Width - 116, Y: r.Y + 10, Width: 100, Height: 20}, walk.TextCenter|walk.TextVCenter|walk.TextSingleLine)
 	draw(fmt.Sprintf("#%s  ·  %s → %s", sub.ID, sub.Start, sub.End), fonts.muted, walk.RGB(73, 110, 124), walk.Rectangle{X: r.X + 12, Y: r.Y + 35, Width: r.Width - 24, Height: 18}, walk.TextLeft|walk.TextVCenter|walk.TextSingleLine|walk.TextEndEllipsis)
 	y := r.Y + 58
 	if len(sub.Routes) > 0 {

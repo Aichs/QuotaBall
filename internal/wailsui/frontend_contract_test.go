@@ -562,8 +562,8 @@ func TestBackendGlassSyncRequiresLoggedInSnapshot(t *testing.T) {
 	if !strings.Contains(syncGlass, "snap.LoggedIn") {
 		t.Fatalf("glass ball visibility must depend on the snapshot logged-in state")
 	}
-	if !strings.Contains(syncGlass, "show := snap.LoggedIn && (snap.Provider == config.ProviderNewAPI || enabled)") {
-		t.Fatalf("glass ball should always show for logged-in NewAPI and otherwise follow the glass setting")
+	if !strings.Contains(syncGlass, "show := snap.Loading || (snap.LoggedIn && (snap.Provider == config.ProviderNewAPI || enabled))") {
+		t.Fatalf("glass ball should show for loading animation, always show for logged-in NewAPI, and otherwise follow the glass setting")
 	}
 }
 
@@ -635,6 +635,31 @@ func TestSnapshotDTODoesNotApplyKrillQuotaFallbacksToSub2(t *testing.T) {
 	}
 }
 
+func TestSnapshotDTOIncludesCurrentSubscriptionFlag(t *testing.T) {
+	dto := snapshotDTO(krill.Snapshot{
+		Provider: config.ProviderKrill,
+		Subscriptions: []krill.Subscription{{
+			ID:            "current",
+			CurrentWindow: true,
+			WeeklyLimit:   600,
+		}},
+	})
+	if len(dto.Subscriptions) != 1 || !dto.Subscriptions[0].Current {
+		t.Fatalf("current subscription flag was not preserved in DTO: %#v", dto.Subscriptions)
+	}
+}
+
+func TestFrontendMarksCurrentSubscriptionBadge(t *testing.T) {
+	raw, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+	if !strings.Contains(js, "sub.current") || !strings.Contains(js, "当前消耗") {
+		t.Fatalf("frontend must mark the current consuming subscription")
+	}
+}
+
 func TestFrontendLoggedOutRootUsesLoginDimensions(t *testing.T) {
 	raw, err := os.ReadFile("frontend/src/main.css")
 	if err != nil {
@@ -645,6 +670,81 @@ func TestFrontendLoggedOutRootUsesLoginDimensions(t *testing.T) {
 		!strings.Contains(css, "width: 446px") ||
 		!strings.Contains(css, "height: 486px") {
 		t.Fatalf("logged-out root must match compact login window dimensions")
+	}
+}
+
+func TestLoginBusyStateUsesRealGlassBallAnimation(t *testing.T) {
+	rawJS, err := os.ReadFile("frontend/src/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(rawJS)
+	for _, want := range []string{
+		"login-loading",
+		"const minLoginAnimationMs = 3000;",
+		"finishLoginAnimation",
+		"beginLoginAnimation",
+		"activeLoginAnimationStartedAt",
+		"await finishLoginAnimation(animationStartedAt)",
+		"state.snapshot?.loading",
+		`EventsOn("snapshot:update", async`,
+		`aria-busy="${loading ? "true" : "false"}"`,
+		`const loading = Boolean(state.busy || state.snapshot?.loading);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("login busy render must include %q", want)
+		}
+	}
+	if strings.Contains(js, "login-liquid-loader") || strings.Contains(js, "login-liquid-water") {
+		t.Fatalf("frontend must not render a second fake login water ball; backend real glass ball owns the animation")
+	}
+
+	rawGo, err := os.ReadFile("../ui/glassball_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	glass := string(rawGo)
+	for _, want := range []string{
+		"renderLoadingBallFrameImage",
+		"drawTurbineWater",
+		"loadingBallPercent = 68",
+		"drawEquatorBand(img, rect)",
+		"drawCenter(img, loadingBallPercent)",
+		"centerText = \"登录中\"",
+	} {
+		if !strings.Contains(glass, want) {
+			t.Fatalf("real glass login animation must include %q", want)
+		}
+	}
+}
+
+func TestBackendLoginTransitionHoldsSavedSessionStartupAnimation(t *testing.T) {
+	raw, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goSrc := string(raw)
+
+	for _, want := range []string{
+		"loginTransition   = 3 * time.Second",
+		"app.snap.Loading = true",
+		"windowSizeForSnapshot(snap)",
+		"waitForLoginTransition(transitionStarted)",
+		"previousSnap.Loading && !previousSnap.LoggedIn",
+		"a.applySnapshot(snap, false)",
+		"hideOnLoginSuccess",
+		"wailsruntime.WindowHide(ctx)",
+		"shouldShowGlassLocked",
+		"positionGlassAtLoginAnimationLocked",
+		"loginWindowWidth-loginGlassSize",
+		"loginWindowHeight-loginGlassSize",
+		"startLoginGlassAnimation",
+		"failLoginGlassAnimation",
+		"showLoginAfterLoadingFailure",
+	} {
+		if !strings.Contains(goSrc, want) {
+			t.Fatalf("backend login transition must include %q", want)
+		}
 	}
 }
 

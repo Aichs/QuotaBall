@@ -44,6 +44,33 @@ func TestDraggedBallBoundsUsesScreenCoordinates(t *testing.T) {
 	}
 }
 
+func TestClampBallBoundsToScreenKeepsRestoredBallVisible(t *testing.T) {
+	screen := walk.Rectangle{X: 0, Y: 0, Width: 2560, Height: 1440}
+	got, adjusted := clampBallBoundsToScreen(walk.Rectangle{X: 2854, Y: 792, Width: ballSize, Height: ballSize}, screen)
+	want := walk.Rectangle{X: 96, Y: 96, Width: ballSize, Height: ballSize}
+	if !adjusted || got != want {
+		t.Fatalf("clamped bounds = %+v adjusted=%v, want %+v adjusted=true", got, adjusted, want)
+	}
+}
+
+func TestClampBallBoundsToScreenSupportsNegativeVirtualScreen(t *testing.T) {
+	screen := walk.Rectangle{X: -1920, Y: 0, Width: 4480, Height: 1440}
+	got, adjusted := clampBallBoundsToScreen(walk.Rectangle{X: -2300, Y: -40, Width: ballSize, Height: ballSize}, screen)
+	want := walk.Rectangle{X: -1824, Y: 96, Width: ballSize, Height: ballSize}
+	if !adjusted || got != want {
+		t.Fatalf("clamped bounds = %+v adjusted=%v, want %+v adjusted=true", got, adjusted, want)
+	}
+}
+
+func TestClampBallBoundsToScreenHandlesScreenSmallerThanBall(t *testing.T) {
+	screen := walk.Rectangle{X: 10, Y: 20, Width: 120, Height: 90}
+	got, adjusted := clampBallBoundsToScreen(walk.Rectangle{X: 400, Y: 500, Width: ballSize, Height: ballSize}, screen)
+	want := walk.Rectangle{X: 10, Y: 20, Width: ballSize, Height: ballSize}
+	if !adjusted || got != want {
+		t.Fatalf("clamped bounds = %+v adjusted=%v, want %+v adjusted=true", got, adjusted, want)
+	}
+}
+
 func TestCenterClickToleratesSmallPointerJitter(t *testing.T) {
 	for _, pt := range []struct {
 		dx int
@@ -149,6 +176,35 @@ func TestGlassBallMetricUsesSelectedMonthlyQuota(t *testing.T) {
 	}
 	if label != "月总额度" || pct != 25 || used != 600 || limit != 2400 {
 		t.Fatalf("monthly metric = (%q, %v, %v, %v), want monthly quota fields", label, pct, used, limit)
+	}
+}
+
+func TestGlassBallActiveSubPrefersCurrentQuotaWindow(t *testing.T) {
+	snap := krill.Snapshot{
+		OK: true,
+		Subscriptions: []krill.Subscription{{
+			ID:               "stale",
+			WeeklyLimit:      600,
+			WeeklyUsed:       400,
+			WeeklyRemaining:  200,
+			MonthlyLimit:     2400,
+			MonthlyUsed:      400,
+			MonthlyRemaining: 2000,
+		}, {
+			ID:               "current",
+			CurrentWindow:    true,
+			WeeklyLimit:      600,
+			WeeklyUsed:       20,
+			WeeklyRemaining:  580,
+			MonthlyLimit:     2400,
+			MonthlyUsed:      20,
+			MonthlyRemaining: 2380,
+		}},
+	}
+
+	sub, ok := activeSubFromSnapshot(snap)
+	if !ok || sub.ID != "current" {
+		t.Fatalf("active sub = %#v ok=%v, want current quota window", sub, ok)
 	}
 }
 
@@ -371,6 +427,60 @@ func TestActiveFrameWaterChangesAcrossAnimationPhases(t *testing.T) {
 	}
 	if changed < 40 {
 		t.Fatalf("active frame water barely changes across animation phases: changed=%d", changed)
+	}
+}
+
+func TestLoadingFrameUsesReferenceBallWithTurbineWater(t *testing.T) {
+	a, err := renderLoadingBallFrameImage(0, "登录中")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := renderLoadingBallFrameImage(ballAnimationStep*8, "登录中")
+	if err != nil {
+		t.Fatal(err)
+	}
+	topWater := a.RGBAAt(95, 30)
+	if topWater.B <= topWater.R || topWater.G <= topWater.R {
+		t.Fatalf("loading turbine water should fill the ball with the blue glass palette near the top: %+v", topWater)
+	}
+	water := a.RGBAAt(95, 54)
+	if water.B <= water.R || water.G <= water.R {
+		t.Fatalf("loading turbine water should keep the blue glass palette near the upper body: %+v", water)
+	}
+	band := a.RGBAAt(28, 94)
+	if band.A < 200 || band.R > 90 || band.G > 110 || band.B > 140 {
+		t.Fatalf("loading ball should keep the reference dark center band: %+v", band)
+	}
+	changed := 0
+	for y := 42; y <= 148; y++ {
+		for x := 42; x <= 148; x++ {
+			c0 := a.RGBAAt(x, y)
+			c1 := b.RGBAAt(x, y)
+			if abs(int(c0.R)-int(c1.R))+abs(int(c0.G)-int(c1.G))+abs(int(c0.B)-int(c1.B))+abs(int(c0.A)-int(c1.A)) > 18 {
+				changed++
+			}
+		}
+	}
+	if changed < 220 {
+		t.Fatalf("loading turbine water barely changes across phases: changed=%d", changed)
+	}
+}
+
+func TestGlassBallDoesNotIncludeLongPressFanMenu(t *testing.T) {
+	raw, err := os.ReadFile("glassball_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	for _, forbidden := range []string{
+		"fanMenu",
+		"LongPress",
+		"renderBallFrameImageWithFanMenu",
+		"drawFrostedMenuButton",
+	} {
+		if strings.Contains(src, forbidden) {
+			t.Fatalf("glass ball should not include long-press fan menu code; found %q", forbidden)
+		}
 	}
 }
 

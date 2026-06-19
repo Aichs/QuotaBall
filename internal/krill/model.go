@@ -3,6 +3,7 @@ package krill
 import (
 	"encoding/json"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -93,6 +94,9 @@ type Subscription struct {
 	MonthlyUsed        float64
 	MonthlyRemaining   float64
 	MonthlyPercent     float64
+	WindowStartAt      time.Time
+	WindowResetAt      time.Time
+	CurrentWindow      bool
 }
 
 type SubscriptionPayload struct {
@@ -312,6 +316,9 @@ type Quota struct {
 	ForwardedLimitUSD     float64 `json:"forwarded_limit_usd"`
 	ForwardedUsedUSD      float64 `json:"forwarded_used_usd"`
 	ForwardedRemainingUSD float64 `json:"forwarded_remaining_usd"`
+	Date                  string  `json:"date"`
+	WindowStartAt         string  `json:"window_start_at"`
+	WindowResetAt         string  `json:"window_reset_at"`
 }
 
 func (q *Quota) UnmarshalJSON(data []byte) error {
@@ -322,6 +329,9 @@ func (q *Quota) UnmarshalJSON(data []byte) error {
 		ForwardedLimitUSD     looseFloat `json:"forwarded_limit_usd"`
 		ForwardedUsedUSD      looseFloat `json:"forwarded_used_usd"`
 		ForwardedRemainingUSD looseFloat `json:"forwarded_remaining_usd"`
+		Date                  string     `json:"date"`
+		WindowStartAt         string     `json:"window_start_at"`
+		WindowResetAt         string     `json:"window_reset_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -333,6 +343,9 @@ func (q *Quota) UnmarshalJSON(data []byte) error {
 		ForwardedLimitUSD:     float64(raw.ForwardedLimitUSD),
 		ForwardedUsedUSD:      float64(raw.ForwardedUsedUSD),
 		ForwardedRemainingUSD: float64(raw.ForwardedRemainingUSD),
+		Date:                  strings.TrimSpace(raw.Date),
+		WindowStartAt:         strings.TrimSpace(raw.WindowStartAt),
+		WindowResetAt:         strings.TrimSpace(raw.WindowResetAt),
 	}
 	return nil
 }
@@ -346,6 +359,7 @@ func (p SubscriptionPayload) ToSnapshot(now time.Time) Snapshot {
 		monthlyQuota += sub.MonthlyLimit
 		subs = append(subs, sub)
 	}
+	prioritizeSubscriptions(subs)
 	if summary.TotalWeeklyQuotaUSD == 0 {
 		summary.TotalWeeklyQuotaUSD = summary.TotalDailyQuotaUSD
 	}
@@ -397,6 +411,8 @@ func (r SubscriptionRecord) ToSubscription(now time.Time) Subscription {
 	if monthlyUsed == 0 {
 		monthlyUsed = weeklyUsed
 	}
+	windowStart := parseKrillTime(r.Quota.WindowStartAt)
+	windowReset := parseKrillTime(r.Quota.WindowResetAt)
 
 	return Subscription{
 		ID:                 r.SubscriptionID,
@@ -421,7 +437,96 @@ func (r SubscriptionRecord) ToSubscription(now time.Time) Subscription {
 		MonthlyUsed:        monthlyUsed,
 		MonthlyRemaining:   math.Max(0, monthlyLimit-monthlyUsed),
 		MonthlyPercent:     percent(monthlyUsed, monthlyLimit),
+		WindowStartAt:      windowStart,
+		WindowResetAt:      windowReset,
+		CurrentWindow:      quotaWindowContains(now, windowStart, windowReset),
 	}
+}
+
+func prioritizeSubscriptions(subs []Subscription) {
+	hasWindow := false
+	for _, sub := range subs {
+		if !sub.WindowStartAt.IsZero() || !sub.WindowResetAt.IsZero() {
+			hasWindow = true
+			break
+		}
+	}
+	if !hasWindow {
+		return
+	}
+	sort.SliceStable(subs, func(i, j int) bool {
+		return subscriptionComesBefore(subs[i], subs[j])
+	})
+}
+
+func subscriptionComesBefore(a, b Subscription) bool {
+	ar, br := subscriptionRank(a), subscriptionRank(b)
+	if ar != br {
+		return ar > br
+	}
+	au := currentWindowUsed(a)
+	bu := currentWindowUsed(b)
+	if (au > 0) != (bu > 0) {
+		return au > 0
+	}
+	if au != bu {
+		return au > bu
+	}
+	if !a.WindowResetAt.IsZero() && !b.WindowResetAt.IsZero() && !a.WindowResetAt.Equal(b.WindowResetAt) {
+		return a.WindowResetAt.Before(b.WindowResetAt)
+	}
+	if !a.WindowStartAt.IsZero() && !b.WindowStartAt.IsZero() && !a.WindowStartAt.Equal(b.WindowStartAt) {
+		return a.WindowStartAt.After(b.WindowStartAt)
+	}
+	return a.ID < b.ID
+}
+
+func subscriptionRank(s Subscription) int {
+	if s.CurrentWindow && currentWindowUsed(s) > 0 {
+		return 5
+	}
+	if s.CurrentWindow && firstPositive(s.WeeklyLimit, s.DailyLimit, s.MonthlyLimit) > 0 {
+		return 4
+	}
+	if s.CurrentWindow {
+		return 3
+	}
+	if firstPositive(s.WeeklyUsed, s.DailyUsed, s.MonthlyUsed) > 0 {
+		return 2
+	}
+	if firstPositive(s.WeeklyRemaining, s.DailyRemaining, s.MonthlyRemaining) > 0 {
+		return 1
+	}
+	return 0
+}
+
+func currentWindowUsed(s Subscription) float64 {
+	return firstPositive(s.WeeklyUsed, s.DailyUsed)
+}
+
+func parseKrillTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func quotaWindowContains(now, start, reset time.Time) bool {
+	if start.IsZero() && reset.IsZero() {
+		return false
+	}
+	if !start.IsZero() && now.Before(start) {
+		return false
+	}
+	if !reset.IsZero() && !now.Before(reset) {
+		return false
+	}
+	return true
 }
 
 func monthlyQuotaLimit(plan Plan, weeklyLimit float64) float64 {

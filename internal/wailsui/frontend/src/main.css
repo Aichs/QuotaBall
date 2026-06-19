@@ -411,6 +411,14 @@ a,
   background: transparent;
 }
 
+.login-stage,
+.dialog.login {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
 .dialog-shell {
   --wails-draggable: drag;
   border-radius: 28px;
@@ -420,10 +428,33 @@ a,
 .dialog.login .dialog-shell {
   width: 430px;
   height: 470px;
+  transform-origin: center;
+  transition:
+    border-radius 360ms cubic-bezier(0.2, 0.82, 0.2, 1),
+    box-shadow 360ms cubic-bezier(0.2, 0.82, 0.2, 1);
+  will-change: border-radius, transform;
 }
 
 .dialog.login .dialog-content {
   gap: 8px;
+}
+
+.dialog.login.login-loading .dialog-shell {
+  width: 430px;
+  height: 470px;
+  padding: 24px 26px;
+  border-radius: 28px;
+  animation: login-shell-clear 560ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.dialog.login.login-loading .dialog-shell::before,
+.dialog.login.login-loading .dialog-shell::after {
+  opacity: 0;
+}
+
+.dialog.login.login-loading .dialog-content {
+  pointer-events: none;
+  animation: login-content-fade 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .dialog.settings .dialog-shell {
@@ -756,4 +787,31 @@ a,
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.45);
   border-color: rgba(255, 150, 150, 0.43);
+}
+
+@keyframes login-shell-clear {
+  0% {
+    background-color: rgba(255, 255, 255, 0);
+    opacity: 1;
+  }
+
+  100% {
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+  }
+}
+
+@keyframes login-content-fade {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: blur(0);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(0.94) translateY(4px);
+    filter: blur(4px);
+  }
 }

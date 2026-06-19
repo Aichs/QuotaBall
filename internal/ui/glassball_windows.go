@@ -27,9 +27,15 @@ const (
 	ballSize           = 190
 	ballAnimationStep  = 0.24
 	ballDragThreshold  = 8
+	loadingBallPercent = 68
 	glassMetricDaily   = "daily"
 	glassMetricWeekly  = "weekly"
 	glassMetricMonthly = "monthly"
+
+	smXVirtualScreen  = 76
+	smYVirtualScreen  = 77
+	smCXVirtualScreen = 78
+	smCYVirtualScreen = 79
 )
 
 type glassBall struct {
@@ -57,6 +63,7 @@ type glassMetricState struct {
 	mode       string
 	togglable  bool
 	ok         bool
+	loading    bool
 }
 
 type glassBallHost interface {
@@ -82,7 +89,7 @@ func newGlassBall(host glassBallHost) (*glassBall, error) {
 		return nil, err
 	}
 	gb.win.SetClientSize(walk.Size{Width: ballSize, Height: ballSize})
-	gb.position()
+	gb.applyConfiguredBounds()
 	applyFrameless(gb.win.Handle(), true)
 	applyToolWindow(gb.win.Handle())
 	applyTopMost(gb.win.Handle(), true)
@@ -139,18 +146,6 @@ func (g *glassBall) installMenu() {
 	g.syncMetricAction()
 }
 
-func (g *glassBall) position() {
-	x, y := 1200, 120
-	cfg := g.host.loadGlassConfig()
-	if cfg.TbarX != nil {
-		x = *cfg.TbarX
-	}
-	if cfg.TbarY != nil {
-		y = *cfg.TbarY
-	}
-	_ = g.win.SetBounds(walk.Rectangle{X: x, Y: y, Width: ballSize, Height: ballSize})
-}
-
 func (g *glassBall) show() {
 	if g.win != nil {
 		applyFrameless(g.win.Handle(), true)
@@ -168,7 +163,14 @@ func (g *glassBall) show() {
 func (g *glassBall) applyCurrentConfig() {
 	cfg := g.host.loadGlassConfig()
 	g.mode = normalizedGlassMetric(cfg.TbarMetric)
+	g.applyConfiguredBoundsWithConfig(cfg)
+}
 
+func (g *glassBall) applyConfiguredBounds() {
+	g.applyConfiguredBoundsWithConfig(g.host.loadGlassConfig())
+}
+
+func (g *glassBall) applyConfiguredBoundsWithConfig(cfg config.Config) {
 	x, y := 1200, 120
 	if cfg.TbarX != nil {
 		x = *cfg.TbarX
@@ -176,7 +178,11 @@ func (g *glassBall) applyCurrentConfig() {
 	if cfg.TbarY != nil {
 		y = *cfg.TbarY
 	}
-	_ = g.win.SetBounds(walk.Rectangle{X: x, Y: y, Width: ballSize, Height: ballSize})
+	bounds, adjusted := clampBallBoundsToScreen(walk.Rectangle{X: x, Y: y, Width: ballSize, Height: ballSize}, currentVirtualScreenBounds())
+	_ = g.win.SetBounds(bounds)
+	if adjusted {
+		g.saveBounds(bounds)
+	}
 }
 
 func (g *glassBall) hide() {
@@ -213,6 +219,21 @@ func (g *glassBall) activeSub() (krill.Subscription, bool) {
 
 func activeSubFromSnapshot(snap krill.Snapshot) (krill.Subscription, bool) {
 	for _, s := range snap.Subscriptions {
+		if s.CurrentWindow && firstPositive(s.WeeklyUsed, s.DailyUsed) > 0.0001 {
+			return s, true
+		}
+	}
+	for _, s := range snap.Subscriptions {
+		if s.CurrentWindow && firstPositive(s.DailyRemaining, s.WeeklyRemaining, s.MonthlyRemaining, s.DailyLimit, s.WeeklyLimit, s.MonthlyLimit) > 0.0001 {
+			return s, true
+		}
+	}
+	for _, s := range snap.Subscriptions {
+		if s.CurrentWindow {
+			return s, true
+		}
+	}
+	for _, s := range snap.Subscriptions {
 		if firstPositive(s.DailyRemaining, s.WeeklyRemaining, s.MonthlyRemaining) > 0.0001 {
 			return s, true
 		}
@@ -233,6 +254,16 @@ func (g *glassBall) metricState() glassMetricState {
 	snap := g.snap
 	mode := normalizedGlassMetricForProvider(snap.Provider, g.mode)
 	g.mu.Unlock()
+	if snap.Loading {
+		return glassMetricState{
+			label:      "登录中",
+			pct:        loadingBallPercent,
+			centerText: "登录中",
+			mode:       glassMetricWeekly,
+			ok:         true,
+			loading:    true,
+		}
+	}
 	if !snap.OK {
 		return glassMetricState{mode: mode}
 	}
@@ -315,7 +346,7 @@ func (g *glassBall) repaint() bool {
 		return false
 	}
 	state := g.metricState()
-	img, err := renderBallFrameImageWithCenterText(state.pct, state.ok, g.phase, state.mode, state.centerText)
+	img, err := renderBallFrameImageWithState(state, g.phase)
 	if err != nil {
 		g.handleRenderFailure("render frame", err)
 		return false
@@ -464,6 +495,71 @@ func draggedBallBounds(startWindow, dragStart, cursor walk.Point) walk.Rectangle
 	}
 }
 
+func currentVirtualScreenBounds() walk.Rectangle {
+	x := int(win.GetSystemMetrics(smXVirtualScreen))
+	y := int(win.GetSystemMetrics(smYVirtualScreen))
+	w := int(win.GetSystemMetrics(smCXVirtualScreen))
+	h := int(win.GetSystemMetrics(smCYVirtualScreen))
+	if w <= 0 || h <= 0 {
+		x = 0
+		y = 0
+		w = int(win.GetSystemMetrics(win.SM_CXSCREEN))
+		h = int(win.GetSystemMetrics(win.SM_CYSCREEN))
+	}
+	return walk.Rectangle{X: x, Y: y, Width: w, Height: h}
+}
+
+func clampBallBoundsToScreen(bounds, screen walk.Rectangle) (walk.Rectangle, bool) {
+	if bounds.Width <= 0 {
+		bounds.Width = ballSize
+	}
+	if bounds.Height <= 0 {
+		bounds.Height = ballSize
+	}
+	if screen.Width <= 0 || screen.Height <= 0 {
+		return bounds, false
+	}
+	original := bounds
+	bounds.X = clampWindowCoordinate(bounds.X, screen.X, screen.Width, bounds.Width)
+	bounds.Y = clampWindowCoordinate(bounds.Y, screen.Y, screen.Height, bounds.Height)
+	if bounds == original {
+		return bounds, false
+	}
+	return defaultBallBoundsInScreen(screen), true
+}
+
+func clampWindowCoordinate(value, screenStart, screenSize, windowSize int) int {
+	if screenSize <= windowSize {
+		return screenStart
+	}
+	minValue := screenStart
+	maxValue := screenStart + screenSize - windowSize
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func defaultBallBoundsInScreen(screen walk.Rectangle) walk.Rectangle {
+	margin := 96
+	if screen.Width <= ballSize+margin {
+		margin = maxInt(0, (screen.Width-ballSize)/2)
+	}
+	yMargin := margin
+	if screen.Height <= ballSize+yMargin {
+		yMargin = maxInt(0, (screen.Height-ballSize)/2)
+	}
+	return walk.Rectangle{
+		X:      screen.X + margin,
+		Y:      screen.Y + yMargin,
+		Width:  ballSize,
+		Height: ballSize,
+	}
+}
+
 func (g *glassBall) toggleMetric() {
 	if !g.metricToggleAllowed() {
 		return
@@ -500,7 +596,10 @@ func (g *glassBall) savePos() {
 	if g.win == nil || g.win.IsDisposed() {
 		return
 	}
-	b := g.win.Bounds()
+	g.saveBounds(g.win.Bounds())
+}
+
+func (g *glassBall) saveBounds(b walk.Rectangle) {
 	g.host.mutateGlassConfig(func(cfg *config.Config) {
 		cfg.TbarX = &b.X
 		cfg.TbarY = &b.Y
@@ -648,6 +747,39 @@ func renderBallFrameImage(pct float64, ok bool, phase float64, modes ...string) 
 		mode = normalizedGlassMetric(modes[0])
 	}
 	return renderBallFrameImageWithCenterText(pct, ok, phase, mode, centerPercentText(pct))
+}
+
+func renderBallFrameImageWithState(state glassMetricState, phase float64) (*image.RGBA, error) {
+	if state.loading {
+		return renderLoadingBallFrameImage(phase, state.centerText)
+	}
+	return renderBallFrameImageWithCenterText(state.pct, state.ok, phase, state.mode, state.centerText)
+}
+
+func renderLoadingBallFrameImage(phase float64, centerText string) (*image.RGBA, error) {
+	if centerText == "" {
+		centerText = "登录中"
+	}
+	base := toRGBA(renderLoadingBallImage(phase))
+	_ = drawCenterValueImage(base, centerText)
+	return base, nil
+}
+
+func renderLoadingBallImage(phase float64) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, ballSize, ballSize))
+	fillImageRGBA(img, transparentKeyColor())
+
+	rect := ballRect()
+	drawSphereShadow(img, rect)
+	drawBackGlass(img, rect)
+	drawTurbineWater(img, rect, phase, weeklyWaterPalette())
+	drawEquatorBand(img, rect)
+	drawFrontGlass(img, rect)
+	drawCenter(img, loadingBallPercent)
+	drawReferenceRim(img, rect)
+	clearOutsideSphere(img, rect, 0.9)
+	clearDetachedBottomTail(img, rect)
+	return img
 }
 
 func renderBallFrameImageWithCenterText(pct float64, ok bool, phase float64, mode string, centerText string) (*image.RGBA, error) {
@@ -908,8 +1040,21 @@ func premultipliedBGRA(src image.Image) []byte {
 }
 
 func updateLayeredWindowImage(hwnd win.HWND, img image.Image) error {
-	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
+	var rect win.RECT
+	if !win.GetWindowRect(hwnd, &rect) {
+		return syscall.EINVAL
+	}
+	return updateLayeredWindowImageAt(hwnd, img, walk.Rectangle{
+		X:      int(rect.Left),
+		Y:      int(rect.Top),
+		Width:  int(rect.Right - rect.Left),
+		Height: int(rect.Bottom - rect.Top),
+	})
+}
+
+func updateLayeredWindowImageAt(hwnd win.HWND, img image.Image, frameBounds walk.Rectangle) error {
+	imageBounds := img.Bounds()
+	width, height := imageBounds.Dx(), imageBounds.Dy()
 	if width <= 0 || height <= 0 {
 		return nil
 	}
@@ -952,12 +1097,7 @@ func updateLayeredWindowImage(hwnd win.HWND, img image.Image) error {
 	}
 	defer win.SelectObject(hdcMem, old)
 
-	var rect win.RECT
-	if !win.GetWindowRect(hwnd, &rect) {
-		return syscall.EINVAL
-	}
-
-	dst := win.POINT{X: rect.Left, Y: rect.Top}
+	dst := win.POINT{X: int32(frameBounds.X), Y: int32(frameBounds.Y)}
 	size := win.SIZE{CX: int32(width), CY: int32(height)}
 	src := win.POINT{}
 	blend := win.BLENDFUNCTION{
@@ -1161,6 +1301,46 @@ func drawWater(img *image.RGBA, r ballFloatRect, pct, phase float64, palette wat
 	drawWaterSurface(img, r, waterY, phase, pct, palette)
 	drawWaterArcs(img, r, pct, phase, palette)
 	drawBubbles(img, r, pct, phase, palette)
+}
+
+func drawTurbineWater(img *image.RGBA, r ballFloatRect, phase float64, palette waterPalette) {
+	cx, cy, rad := r.cx(), r.cy(), r.rad()
+	spin := -phase * 0.92
+	for y := 0; y < ballSize; y++ {
+		for x := 0; x < ballSize; x++ {
+			px, py := float64(x)+0.5, float64(y)+0.5
+			d := math.Hypot(px-cx, py-cy)
+			if d > rad {
+				continue
+			}
+			nr := clamp01(d / rad)
+			angle := math.Atan2(py-cy, px-cx) + spin
+			blade := math.Sin(angle*4.0 - nr*8.0)
+			counter := math.Sin(angle*2.4 + nr*11.0 - spin*1.8)
+			foam := clamp01((blade*0.58 + counter*0.42 + 0.34) / 1.34)
+			depth := clamp01(0.20 + nr*0.72 + math.Sin(angle*2.0+spin)*0.08)
+			col := verticalWater(depth, palette)
+			alpha := 0.92 - nr*0.18
+			sourceOverPixel(img, x, y, col, alpha)
+			sourceOverPixel(img, x, y, color.RGBA{235, 255, 255, 168}, math.Pow(foam, 3.2)*0.58)
+			sourceOverPixel(img, x, y, color.RGBA{0, 92, 135, 74}, clamp01(1-foam)*nr*0.16)
+		}
+	}
+	drawTurbineFoamRing(img, r, phase, palette)
+}
+
+func drawTurbineFoamRing(img *image.RGBA, r ballFloatRect, phase float64, palette waterPalette) {
+	cx, cy, rad := r.cx(), r.cy(), r.rad()
+	for i := 0; i < 10; i++ {
+		a := -phase*0.9 + float64(i)*math.Pi*2/10
+		wobble := math.Sin(-phase*0.55+float64(i)*1.7) * 4.5
+		dist := rad*(0.32+0.19*math.Sin(float64(i)*1.11-phase*0.36)) + wobble
+		x := cx + math.Cos(a)*dist
+		y := cy + math.Sin(a)*dist*0.82
+		size := 2.2 + float64(i%4)*0.72
+		drawEllipseOutline(img, x, y, size, size, palette.bubbleOutline, 1.1, 0.88)
+		drawEllipseOutline(img, x-0.6, y-0.6, size*0.55, size*0.55, palette.bubbleHighlight, 0.7, 0.88)
+	}
 }
 
 func waterBaseY(r ballFloatRect, pct float64) float64 {
@@ -1382,6 +1562,13 @@ func blendPixel(img *image.RGBA, x, y int, c color.RGBA, a float64) {
 
 func sourceOverPixel(img *image.RGBA, x, y int, c color.RGBA, alphaScale float64) {
 	if x < 0 || y < 0 || x >= ballSize || y >= ballSize {
+		return
+	}
+	sourceOverPixelInBounds(img, x, y, c, alphaScale)
+}
+
+func sourceOverPixelInBounds(img *image.RGBA, x, y int, c color.RGBA, alphaScale float64) {
+	if img == nil || x < img.Rect.Min.X || y < img.Rect.Min.Y || x >= img.Rect.Max.X || y >= img.Rect.Max.Y {
 		return
 	}
 	srcA := clamp01(float64(c.A) / 255 * alphaScale)

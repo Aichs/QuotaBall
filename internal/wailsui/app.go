@@ -32,7 +32,9 @@ const (
 	panelHeight       = 820
 	loginWindowWidth  = 446
 	loginWindowHeight = 486
+	loginGlassSize    = 190
 	appWindowTitle    = "QuotaBall"
+	loginTransition   = 3 * time.Second
 )
 
 //go:embed all:frontend/src
@@ -180,9 +182,11 @@ func NewApp() (*App, error) {
 		Secrets: st,
 	}
 	app.subSvc.Configure(app.cfg)
-	app.snap = krill.EmptySnapshot("正在检查登录状态...")
+	app.snap = krill.EmptySnapshot("正在登录...")
 	app.snap.Provider = normalizeProvider(cfg.Provider)
-	if !app.hasLoginState() {
+	if app.hasLoginState() {
+		app.snap.Loading = true
+	} else {
 		app.snap = krill.EmptySnapshot(app.loginRequiredMessage())
 		app.snap.Provider = normalizeProvider(cfg.Provider)
 	}
@@ -216,11 +220,19 @@ func (a *App) startup(ctx context.Context) {
 	snap := a.snap
 	a.mu.Unlock()
 
-	windowWidth, windowHeight := windowSizeForLoginState(hasLogin)
+	windowWidth, windowHeight := windowSizeForSnapshot(snap)
 	a.positionWindow(ctx, cfg, windowWidth, windowHeight)
 	a.syncWindowSize(windowWidth, windowHeight)
 	wailsruntime.WindowSetAlwaysOnTop(ctx, cfg.OnTop)
 	hideMainWindowFromTaskbar()
+	if snap.Loading {
+		a.mu.Lock()
+		cfg := a.positionGlassAtLoginAnimationLocked(ctx)
+		a.visible = false
+		a.mu.Unlock()
+		_ = config.Save(a.paths.Config, cfg)
+		wailsruntime.WindowHide(ctx)
+	}
 	go a.commandLoop()
 	_ = a.ensureTrayController()
 	a.syncGlass(snap)
@@ -342,16 +354,19 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 		return SnapshotDTO{}, err
 	}
 	defer a.finishOperation(op)
+	transitionStarted := a.startLoginGlassAnimation(provider)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if provider == config.ProviderSub2 {
 		baseURL, err := sub2.NormalizeBaseURL(req.BaseURL)
 		if err != nil {
+			a.failLoginGlassAnimation(provider, err.Error())
 			return SnapshotDTO{}, err
 		}
 		snap, err := a.subSvc.Login(ctx, baseURL, email, req.Password, req.RememberLogin)
 		if err != nil {
+			a.failLoginGlassAnimation(provider, err.Error())
 			return SnapshotDTO{}, err
 		}
 		if current, stale := a.snapshotIfAuthChanged(authGen); stale {
@@ -369,15 +384,18 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 		a.mu.Unlock()
 		a.subSvc.Configure(cfg)
 		if err := config.Save(a.paths.Config, cfg); err != nil {
+			a.failLoginGlassAnimation(provider, err.Error())
 			return SnapshotDTO{}, err
 		}
 		if snap.Provider == "" {
 			snap.Provider = config.ProviderSub2
 		}
-		a.applySnapshot(snap, true)
+		waitForLoginTransition(transitionStarted)
+		a.applySnapshot(snap, false)
 		return snapshotDTO(snap), nil
 	}
 	if err := a.svc.Login(ctx, email, req.Password, req.RememberLogin); err != nil {
+		a.failLoginGlassAnimation(provider, err.Error())
 		return SnapshotDTO{}, err
 	}
 	if current, stale := a.snapshotIfAuthChanged(authGen); stale {
@@ -395,14 +413,17 @@ func (a *App) Login(req LoginRequest) (SnapshotDTO, error) {
 	a.svc.Configure(cfg)
 	err = config.Save(a.paths.Config, cfg)
 	if err != nil {
+		a.failLoginGlassAnimation(provider, err.Error())
 		return SnapshotDTO{}, err
 	}
 
 	snap, err := a.fetch(ctx)
 	if err != nil {
+		a.failLoginGlassAnimation(provider, err.Error())
 		return SnapshotDTO{}, err
 	}
-	a.applySnapshot(snap, true)
+	waitForLoginTransition(transitionStarted)
+	a.applySnapshot(snap, false)
 	return snapshotDTO(snap), nil
 }
 
@@ -491,6 +512,7 @@ func (a *App) completeNewAPIOAuth(ctx context.Context, req NewAPIOAuthCompleteRe
 		return SnapshotDTO{}, err
 	}
 	defer a.finishOperation(op)
+	transitionStarted := a.startLoginGlassAnimation(config.ProviderNewAPI)
 
 	var snap krill.Snapshot
 	if accessToken != "" {
@@ -507,6 +529,7 @@ func (a *App) completeNewAPIOAuth(ctx context.Context, req NewAPIOAuthCompleteRe
 		snap, err = a.newSvc.CompleteLinuxDo(ctx, baseURL, callbackURL, req.RememberLogin)
 	}
 	if err != nil {
+		a.failLoginGlassAnimation(config.ProviderNewAPI, err.Error())
 		return SnapshotDTO{}, err
 	}
 	snap.Provider = config.ProviderNewAPI
@@ -529,9 +552,11 @@ func (a *App) completeNewAPIOAuth(ctx context.Context, req NewAPIOAuthCompleteRe
 	}
 	a.newSvc.Configure(cfg)
 	if err := config.Save(a.paths.Config, cfg); err != nil {
+		a.failLoginGlassAnimation(config.ProviderNewAPI, err.Error())
 		return SnapshotDTO{}, err
 	}
-	a.applySnapshot(snap, true)
+	waitForLoginTransition(transitionStarted)
+	a.applySnapshot(snap, false)
 	return snapshotDTO(snap), nil
 }
 
@@ -853,9 +878,10 @@ func (a *App) Quit() error {
 }
 
 func (a *App) refresh(reveal bool) (SnapshotDTO, error) {
-	op, snap, authGen, ok := a.beginRefreshOperation()
+	transitionStarted := time.Now()
+	op, previousSnap, authGen, ok := a.beginRefreshOperation()
 	if !ok {
-		return snapshotDTO(snap), nil
+		return snapshotDTO(previousSnap), nil
 	}
 	defer a.finishOperation(op)
 
@@ -869,8 +895,57 @@ func (a *App) refresh(reveal bool) (SnapshotDTO, error) {
 	if current, stale := a.snapshotIfAuthChanged(authGen); stale {
 		return snapshotDTO(current), nil
 	}
+	if previousSnap.Loading && !previousSnap.LoggedIn {
+		waitForLoginTransition(transitionStarted)
+	}
 	a.applySnapshot(snap, reveal)
 	return snapshotDTO(snap), err
+}
+
+func waitForLoginTransition(started time.Time) {
+	if started.IsZero() {
+		return
+	}
+	if remaining := loginTransition - time.Since(started); remaining > 0 {
+		time.Sleep(remaining)
+	}
+}
+
+func (a *App) startLoginGlassAnimation(provider string) time.Time {
+	started := time.Now()
+	snap := krill.EmptySnapshot("正在登录...")
+	snap.Provider = normalizeProvider(provider)
+	snap.Loading = true
+	a.mu.Lock()
+	if a.quitting {
+		a.mu.Unlock()
+		return started
+	}
+	a.snap = snap
+	ctx := a.ctx
+	var cfgToSave *config.Config
+	if ctx != nil {
+		cfg := a.positionGlassAtLoginAnimationLocked(ctx)
+		cfgToSave = &cfg
+		a.visible = false
+	}
+	a.mu.Unlock()
+	if cfgToSave != nil {
+		_ = config.Save(a.paths.Config, *cfgToSave)
+	}
+	if ctx != nil {
+		wailsruntime.WindowHide(ctx)
+	}
+	a.syncGlass(snap)
+	a.syncTray(snap)
+	a.emitSnapshot(snap)
+	return started
+}
+
+func (a *App) failLoginGlassAnimation(provider, message string) {
+	snap := krill.EmptySnapshot(message)
+	snap.Provider = normalizeProvider(provider)
+	a.applySnapshot(snap, false)
 }
 
 func (a *App) snapshotIfAuthChanged(gen uint64) (krill.Snapshot, bool) {
@@ -918,20 +993,54 @@ func (a *App) applySnapshot(snap krill.Snapshot, reveal bool) {
 		a.mu.Unlock()
 		return
 	}
+	previous := a.snap
 	a.snap = snap
 	ctx := a.ctx
+	loginSuccessWithoutReveal := !reveal && snap.LoggedIn && !previous.LoggedIn
+	hideOnLoginSuccess := loginSuccessWithoutReveal && a.shouldShowGlassLocked(snap)
+	showPanelOnLoginSuccess := loginSuccessWithoutReveal && !hideOnLoginSuccess
+	showLoginAfterLoadingFailure := !reveal && previous.Loading && !snap.LoggedIn
+	var cfgToSave *config.Config
+	if hideOnLoginSuccess && ctx != nil {
+		cfg := a.positionGlassAtLoginAnimationLocked(ctx)
+		cfgToSave = &cfg
+	}
+	if hideOnLoginSuccess {
+		a.visible = false
+	}
 	a.mu.Unlock()
+	if cfgToSave != nil {
+		_ = config.Save(a.paths.Config, *cfgToSave)
+	}
+	if hideOnLoginSuccess && ctx != nil {
+		wailsruntime.WindowHide(ctx)
+	}
 	a.syncWindowForSnapshot(snap)
 	a.syncGlass(snap)
 	a.syncTray(snap)
 	a.emitSnapshot(snap)
-	if reveal && snap.LoggedIn && ctx != nil {
+	if ((reveal || showPanelOnLoginSuccess) && snap.LoggedIn || showLoginAfterLoadingFailure) && ctx != nil {
 		wailsruntime.WindowShow(ctx)
 		hideMainWindowFromTaskbar()
 		a.mu.Lock()
 		a.visible = true
 		a.mu.Unlock()
 	}
+}
+
+func (a *App) shouldShowGlassLocked(snap krill.Snapshot) bool {
+	return snap.LoggedIn && (snap.Provider == config.ProviderNewAPI || a.cfg.TbarEnabled)
+}
+
+func (a *App) positionGlassAtLoginAnimationLocked(ctx context.Context) config.Config {
+	x, y := wailsruntime.WindowGetPosition(ctx)
+	glassX := x + (loginWindowWidth-loginGlassSize)/2
+	glassY := y + (loginWindowHeight-loginGlassSize)/2
+	a.cfg.TbarX = &glassX
+	a.cfg.TbarY = &glassY
+	a.cfg.Password = ""
+	cfg := a.cfg
+	return cfg
 }
 
 func (a *App) emitSnapshot(snap krill.Snapshot) {
@@ -964,9 +1073,6 @@ func (a *App) scheduleLoop() {
 }
 
 func (a *App) initialWindowSize() (int, int) {
-	if a.hasLoginState() {
-		return panelWidth, panelHeight
-	}
 	a.mu.Lock()
 	snap := a.snap
 	a.mu.Unlock()
@@ -1178,7 +1284,7 @@ func (a *App) syncGlass(snap krill.Snapshot) {
 		}
 		return
 	}
-	show := snap.LoggedIn && (snap.Provider == config.ProviderNewAPI || enabled)
+	show := snap.Loading || (snap.LoggedIn && (snap.Provider == config.ProviderNewAPI || enabled))
 	if show && glass == nil {
 		_ = a.ensureGlassController()
 		a.mu.Lock()

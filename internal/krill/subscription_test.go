@@ -163,3 +163,109 @@ func TestParseSubscriptionBuildsWeeklyAndMonthlyQuotaState(t *testing.T) {
 		t.Fatalf("monthly fields = limit %v used %v pct %v", sub.MonthlyLimit, sub.MonthlyUsed, sub.MonthlyPercent)
 	}
 }
+
+func TestParseSubscriptionPrioritizesCurrentQuotaWindow(t *testing.T) {
+	const raw = `{
+		"summary":{
+			"total_used_usd":"20",
+			"total_daily_quota_usd":"1200",
+			"total_remaining_usd":"1180"
+		},
+		"subscriptions":[{
+			"subscription_id":5344,
+			"subscription_start_at":"2026-06-10T04:23:51Z",
+			"subscription_end_at":"2026-07-10T04:23:51Z",
+			"total_used_usd":"400",
+			"plan":{"name":"旧窗口月卡","billing_type":"usd_weekly","duration_days":30},
+			"quota":{
+				"daily_limit_usd":"600",
+				"used_usd":"400",
+				"remaining_usd":"200",
+				"window_start_at":"2026-06-09T16:00:00Z",
+				"window_reset_at":"2026-06-16T16:00:00Z"
+			}
+		},{
+			"subscription_id":6911,
+			"subscription_start_at":"2026-06-13T06:45:41Z",
+			"subscription_end_at":"2026-07-13T06:45:41Z",
+			"total_used_usd":"20",
+			"plan":{"name":"当前窗口月卡","billing_type":"usd_weekly","duration_days":30},
+			"quota":{
+				"daily_limit_usd":"600",
+				"used_usd":"20",
+				"remaining_usd":"580",
+				"window_start_at":"2026-06-16T16:00:00Z",
+				"window_reset_at":"2026-06-23T16:00:00Z"
+			}
+		}]
+	}`
+	var payload SubscriptionPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := payload.ToSnapshot(time.Date(2026, 6, 19, 10, 0, 0, 0, time.UTC))
+
+	if len(snap.Subscriptions) != 2 {
+		t.Fatalf("subscription count = %d, want 2", len(snap.Subscriptions))
+	}
+	if got := snap.Subscriptions[0].ID; got != "6911" {
+		t.Fatalf("first subscription = %q, want current window subscription 6911", got)
+	}
+	if !snap.Subscriptions[0].CurrentWindow {
+		t.Fatalf("current subscription was not marked CurrentWindow: %#v", snap.Subscriptions[0])
+	}
+	if snap.Subscriptions[1].CurrentWindow {
+		t.Fatalf("stale subscription was marked CurrentWindow: %#v", snap.Subscriptions[1])
+	}
+}
+
+func TestParseSubscriptionPrioritizesCurrentWindowUsageOverHistoricalTotal(t *testing.T) {
+	const raw = `{
+		"summary":{
+			"total_used_usd":"345.624580",
+			"total_daily_quota_usd":"1692.000000",
+			"total_remaining_usd":"1346.375420"
+		},
+		"subscriptions":[{
+			"subscription_id":5344,
+			"subscription_start_at":"2026-06-10T04:23:51Z",
+			"subscription_end_at":"2026-07-10T04:23:51Z",
+			"total_used_usd":"792.000000",
+			"plan":{"name":"旧月卡","billing_type":"usd_weekly","duration_days":30},
+			"quota":{
+				"daily_limit_usd":"792.000000",
+				"used_usd":"0.000000",
+				"remaining_usd":"792.000000",
+				"window_start_at":"2026-06-16T16:00:00Z",
+				"window_reset_at":"2026-06-23T16:00:00Z"
+			}
+		},{
+			"subscription_id":6911,
+			"subscription_start_at":"2026-06-13T06:45:41Z",
+			"subscription_end_at":"2026-07-13T06:45:41Z",
+			"total_used_usd":"345.624580",
+			"plan":{"name":"正在消耗月卡","billing_type":"usd_weekly","duration_days":30},
+			"quota":{
+				"daily_limit_usd":"900.000000",
+				"used_usd":"345.624580",
+				"remaining_usd":"554.375420",
+				"window_start_at":"2026-06-12T16:00:00Z",
+				"window_reset_at":"2026-06-19T16:00:00Z"
+			}
+		}]
+	}`
+	var payload SubscriptionPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := payload.ToSnapshot(time.Date(2026, 6, 19, 11, 23, 0, 0, time.UTC))
+
+	if got := snap.Subscriptions[0].ID; got != "6911" {
+		t.Fatalf("first subscription = %q, want currently consuming subscription 6911", got)
+	}
+	if got := snap.Subscriptions[0].WeeklyUsed; got != 345.62458 {
+		t.Fatalf("current window used = %v, want 345.62458", got)
+	}
+}

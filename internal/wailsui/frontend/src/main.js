@@ -24,6 +24,7 @@ const state = {
     err: "正在检查登录状态...",
     ok: false,
     loggedIn: false,
+    loading: false,
   },
   modal: "",
   busy: false,
@@ -31,9 +32,11 @@ const state = {
   oauthMessage: "",
   oauthAuthorizeUrl: "",
   oauthWaitTimer: null,
+  loginAnimationStartedAt: 0,
 };
 
 const app = document.querySelector("#app");
+const minLoginAnimationMs = 3000;
 
 function backend() {
   const root = window.go || {};
@@ -61,6 +64,30 @@ async function waitForBackend() {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function beginLoginAnimation() {
+  state.loginAnimationStartedAt = Date.now();
+  return state.loginAnimationStartedAt;
+}
+
+function activeLoginAnimationStartedAt() {
+  if (!state.loginAnimationStartedAt) {
+    return beginLoginAnimation();
+  }
+  return state.loginAnimationStartedAt;
+}
+
+function endLoginAnimation() {
+  state.loginAnimationStartedAt = 0;
+}
+
+async function finishLoginAnimation(startedAt) {
+  const elapsed = Date.now() - startedAt;
+  const remaining = Math.max(0, minLoginAnimationMs - elapsed);
+  if (remaining > 0) {
+    await delay(remaining);
+  }
 }
 
 function money(value, digits = 2) {
@@ -320,11 +347,14 @@ function renderSub(sub, snapshot) {
   const routes = Array.isArray(sub.routes) ? sub.routes.slice(0, 6) : [];
   const quota = subQuota(sub, snapshot);
   const sub2 = isSub2Provider(snapshot);
+  const badgeText = sub.current
+    ? `当前消耗 · ${text(sub.daysLeftText, "? 天后到期")}`
+    : text(sub.daysLeftText, "? 天后到期");
   return `
     <section class="sub-card">
       <div class="sub-top">
         <div class="sub-name">${escapeHTML(text(sub.name, "套餐"))}</div>
-        <div class="badge">${escapeHTML(text(sub.daysLeftText, "? 天后到期"))}</div>
+        <div class="badge">${escapeHTML(badgeText)}</div>
       </div>
       <div class="sub-detail">#${escapeHTML(sub.id)}  ·  ${escapeHTML(sub.start)} → ${escapeHTML(sub.end)}</div>
       ${routes.length ? `<div class="routes">${routes.map((route) => `<span class="route">${escapeHTML(route)}</span>`).join("")}</div>` : ""}
@@ -386,8 +416,9 @@ function renderLogin(asModal = true) {
   const err = state.formError || loggedOutSnapshotError(provider);
   const formName = provider === "newapi" ? "newapi-complete" : "login";
   const title = provider === "newapi" ? "登录 NewAPI" : provider === "sub2" ? "登录 Sub2" : "登录 Krill AI";
+  const loading = Boolean(state.busy || state.snapshot?.loading);
   const body = `
-    <form class="dialog login" data-form="${formName}">
+    <form class="dialog login ${loading ? "login-loading" : ""}" data-form="${formName}" aria-busy="${loading ? "true" : "false"}">
       <div class="dialog-shell">
         <div class="dots">${renderDialogDots(430, 430)}</div>
         <div class="dialog-content">
@@ -728,11 +759,13 @@ async function onLogin(event) {
     render();
     return;
   }
+  const animationStartedAt = beginLoginAnimation();
   state.busy = true;
   state.formError = "";
   render();
   try {
     const snap = await backend().Login({ provider, baseUrl, email, password, rememberLogin });
+    await finishLoginAnimation(animationStartedAt);
     state.snapshot = snap;
     if (provider === "sub2") {
       state.config = { ...state.config, provider, sub2BaseUrl: baseUrl, sub2Email: email, rememberLogin };
@@ -741,10 +774,12 @@ async function onLogin(event) {
     }
     state.modal = "";
   } catch (err) {
+    await finishLoginAnimation(animationStartedAt);
     state.formError = String(err || "登录失败");
     state.modal = "login";
   } finally {
     state.busy = false;
+    endLoginAnimation();
     render();
   }
 }
@@ -862,6 +897,7 @@ async function onNewAPIComplete(event) {
     render();
     return;
   }
+  const animationStartedAt = beginLoginAnimation();
   state.busy = true;
   state.formError = "";
   render();
@@ -871,11 +907,14 @@ async function onNewAPIComplete(event) {
       callbackUrl,
       rememberLogin,
     });
+    await finishLoginAnimation(animationStartedAt);
   } catch (err) {
+    await finishLoginAnimation(animationStartedAt);
     state.formError = String(err || "NewAPI 登录失败");
     state.modal = "login";
   } finally {
     state.busy = false;
+    endLoginAnimation();
     render();
   }
 }
@@ -946,7 +985,11 @@ async function boot() {
   render();
   const api = await waitForBackend();
   if (window.runtime?.EventsOn) {
-    window.runtime.EventsOn("snapshot:update", (snap) => {
+    window.runtime.EventsOn("snapshot:update", async (snap) => {
+      const shouldFinishLoginAnimation = Boolean(state.loginAnimationStartedAt && !snap.loading);
+      if (shouldFinishLoginAnimation) {
+        await finishLoginAnimation(activeLoginAnimationStartedAt());
+      }
       state.snapshot = snap;
       if (snap.loggedIn && state.modal === "login") {
         clearOAuthWaitTimer();
@@ -957,6 +1000,11 @@ async function boot() {
       }
       if (!snap.loggedIn) {
         state.modal = "login";
+      }
+      if (snap.loading) {
+        activeLoginAnimationStartedAt();
+      } else {
+        endLoginAnimation();
       }
       render();
     });
@@ -988,6 +1036,9 @@ async function boot() {
   state.config.sub2BaseUrl ||= "";
   state.config.sub2Email ||= "";
   state.snapshot = initial.snapshot;
+  if (state.snapshot.loading) {
+    activeLoginAnimationStartedAt();
+  }
   if (!state.snapshot.loggedIn) {
     state.modal = "login";
   }

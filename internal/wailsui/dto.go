@@ -121,6 +121,7 @@ type SubscriptionDTO struct {
 	Name               string   `json:"name"`
 	DaysLeft           string   `json:"daysLeft"`
 	DaysLeftText       string   `json:"daysLeftText"`
+	Current            bool     `json:"current"`
 	Start              string   `json:"start"`
 	End                string   `json:"end"`
 	Routes             []string `json:"routes"`
@@ -282,6 +283,7 @@ func subscriptionDTO(provider string, s krill.Subscription) SubscriptionDTO {
 		Name:               fallback(s.Name, "套餐"),
 		DaysLeft:           days,
 		DaysLeftText:       days + " 天后到期",
+		Current:            s.CurrentWindow,
 		Start:              s.Start,
 		End:                s.End,
 		Routes:             append([]string(nil), s.Routes...),
